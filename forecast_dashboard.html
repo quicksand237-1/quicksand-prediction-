@@ -1,0 +1,971 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Musk Count Market Lab</title>
+  <style>
+    :root {
+      --bg: #f4f6f8;
+      --panel: #ffffff;
+      --line: #d9e0e7;
+      --ink: #18212b;
+      --muted: #657383;
+      --accent: #1769aa;
+      --accent-soft: #e6f1fb;
+      --good: #16734a;
+      --good-soft: #e5f5ec;
+      --warn: #9a6500;
+      --warn-soft: #fff5d7;
+      --bad: #b33a3a;
+      --bad-soft: #fdebec;
+      --shadow: 0 4px 16px rgba(23, 43, 60, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--bg);
+      font: 14px/1.45 "Segoe UI", "Microsoft YaHei", sans-serif;
+    }
+    button, input, select { font: inherit; }
+    button { cursor: pointer; }
+    .shell { max-width: 1440px; margin: 0 auto; padding: 22px; }
+    .topbar {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 24px; letter-spacing: 0; }
+    h2 { font-size: 16px; letter-spacing: 0; }
+    h3 { font-size: 14px; letter-spacing: 0; }
+    .subtitle { color: var(--muted); margin-top: 5px; }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .status-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--warn);
+    }
+    .status-dot.ready { background: var(--good); }
+    .toolbar, .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+    }
+    .toolbar {
+      display: grid;
+      grid-template-columns: minmax(210px, 1fr) minmax(210px, 1fr) minmax(210px, 1fr) auto auto;
+      gap: 10px;
+      align-items: end;
+      padding: 14px;
+      margin-bottom: 14px;
+    }
+    .live-toolbar {
+      display: grid;
+      grid-template-columns: minmax(280px, 1.5fr) 150px auto auto minmax(190px, 1fr);
+      gap: 10px;
+      align-items: end;
+      padding: 14px;
+      margin-bottom: 14px;
+      color: #fff;
+      background: #102b3f;
+      border: 1px solid #173f58;
+    }
+    .live-toolbar label { color: #b9d3e4; }
+    .live-toolbar input, .live-toolbar select {
+      width: 100%;
+      min-height: 36px;
+      padding: 7px 9px;
+      color: var(--ink);
+      background: #fff;
+      border: 1px solid #b9d3e4;
+      border-radius: 4px;
+    }
+    .live-toolbar .button { border-color: #66a8cf; background: #287aa8; }
+    .live-toolbar .button.secondary { color: #d6edf9; background: transparent; }
+    .live-status { color: #d6edf9; font-size: 12px; overflow-wrap: anywhere; }
+    label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
+    input[type="file"], select {
+      width: 100%;
+      min-height: 36px;
+      padding: 7px 9px;
+      color: var(--ink);
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+    }
+    input[type="range"] { width: 100%; accent-color: var(--accent); }
+    .button {
+      min-height: 36px;
+      padding: 7px 13px;
+      border: 1px solid var(--accent);
+      border-radius: 4px;
+      color: #fff;
+      background: var(--accent);
+      font-weight: 600;
+    }
+    .button.secondary {
+      color: var(--accent);
+      background: #fff;
+    }
+    .button:disabled { cursor: not-allowed; opacity: .45; }
+    .modebar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .mode-button {
+      min-height: 32px;
+      padding: 5px 11px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: #fff;
+      color: var(--muted);
+    }
+    .mode-button.active {
+      color: var(--accent);
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+    .mode-note { color: var(--muted); margin-left: 4px; }
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.7fr) minmax(320px, 1fr);
+      gap: 14px;
+    }
+    .panel { padding: 16px; }
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 13px;
+    }
+    .market-meta { color: var(--muted); font-size: 12px; }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 9px;
+    }
+    .metric {
+      min-height: 90px;
+      padding: 11px;
+      border: 1px solid var(--line);
+      background: #fbfcfd;
+    }
+    .metric-label { color: var(--muted); font-size: 12px; }
+    .metric-value {
+      margin-top: 8px;
+      font-size: 22px;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+    .metric-small { font-size: 15px; }
+    .timeline { margin-top: 17px; }
+    .timeline-line {
+      display: flex;
+      justify-content: space-between;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .timeline input { margin: 7px 0 1px; }
+    .guess-box {
+      display: grid;
+      gap: 10px;
+      margin-top: 14px;
+      padding: 13px;
+      border-left: 3px solid var(--accent);
+      background: var(--accent-soft);
+    }
+    .guess-title { font-size: 13px; font-weight: 700; }
+    .guess-main { font-size: 20px; font-weight: 700; }
+    .guess-detail { color: #35566f; }
+    .signal {
+      display: grid;
+      gap: 10px;
+    }
+    .signal-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--line);
+    }
+    .signal-row:last-child { padding-bottom: 0; border-bottom: 0; }
+    .signal-key { color: var(--muted); }
+    .signal-value { text-align: right; font-weight: 700; }
+    .badge {
+      display: inline-block;
+      padding: 3px 7px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .badge.good { color: var(--good); background: var(--good-soft); }
+    .badge.warn { color: var(--warn); background: var(--warn-soft); }
+    .badge.bad { color: var(--bad); background: var(--bad-soft); }
+    .badge.neutral { color: var(--muted); background: #edf1f4; }
+    .section {
+      margin-top: 14px;
+    }
+    .section p { color: var(--muted); }
+    .hidden { display: none !important; }
+    .lock {
+      padding: 14px;
+      color: var(--muted);
+      border: 1px dashed var(--line);
+      background: #fafbfc;
+    }
+    .review-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 9px;
+      margin-top: 12px;
+    }
+    .review-value {
+      min-height: 70px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      background: #fbfcfd;
+    }
+    .review-value strong { display: block; margin-top: 6px; font-size: 18px; }
+    .table-wrap { overflow: auto; margin-top: 14px; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td {
+      padding: 8px 9px;
+      text-align: left;
+      border-bottom: 1px solid var(--line);
+      white-space: nowrap;
+    }
+    th { color: var(--muted); font-weight: 600; background: #f7f9fb; }
+    .empty {
+      display: grid;
+      min-height: 330px;
+      place-items: center;
+      text-align: center;
+      color: var(--muted);
+      border: 1px dashed var(--line);
+      background: #fafbfc;
+    }
+    .footer-note {
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .live-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(320px, 1fr);
+      gap: 14px;
+      margin-bottom: 14px;
+    }
+    .live-metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 9px;
+    }
+    .live-metric {
+      min-height: 82px;
+      padding: 11px;
+      border: 1px solid var(--line);
+      background: #fbfcfd;
+    }
+    .live-metric strong {
+      display: block;
+      margin-top: 7px;
+      font-size: 21px;
+      overflow-wrap: anywhere;
+    }
+    .live-list {
+      display: grid;
+      gap: 8px;
+      max-height: 310px;
+      overflow: auto;
+    }
+    .live-list-item {
+      padding: 9px;
+      border: 1px solid var(--line);
+      background: #fbfcfd;
+    }
+    .live-list-item a { color: var(--accent); text-decoration: none; }
+    .live-list-meta { color: var(--muted); font-size: 11px; margin-top: 3px; }
+    .live-table-wrap { max-height: 320px; overflow: auto; }
+    .live-recommendation {
+      padding: 12px;
+      border-left: 3px solid var(--warn);
+      background: var(--warn-soft);
+    }
+    .live-recommendation.good {
+      border-left-color: var(--good);
+      background: var(--good-soft);
+    }
+    .live-recommendation strong { display: block; font-size: 18px; }
+    @media (max-width: 980px) {
+      .toolbar, .live-toolbar { grid-template-columns: 1fr 1fr; }
+      .grid { grid-template-columns: 1fr; }
+      .live-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 620px) {
+      .shell { padding: 13px; }
+      .topbar { display: block; }
+      .status { margin-top: 10px; }
+      .toolbar, .live-toolbar, .metrics, .review-grid, .live-metrics { grid-template-columns: 1fr 1fr; }
+      .toolbar .button { width: 100%; }
+      .live-toolbar .button { width: 100%; }
+      .metrics .metric:first-child { grid-column: span 2; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <h1>Musk Count Market Lab</h1>
+        <p class="subtitle">七天发帖数市场的一小时预测、竞猜与复盘</p>
+      </div>
+      <div class="status"><span id="statusDot" class="status-dot"></span><span id="statusText">等待载入本地 CSV</span></div>
+    </header>
+
+    <section class="toolbar" aria-label="数据加载">
+      <label>
+        公开预测 CSV
+        <input id="hourlyFile" type="file" accept=".csv,text/csv">
+      </label>
+      <label>
+        私有结算明细 CSV（复盘）
+        <input id="privateFile" type="file" accept=".csv,text/csv">
+      </label>
+      <label>
+        市场汇总 CSV（可选）
+        <input id="summaryFile" type="file" accept=".csv,text/csv">
+      </label>
+      <button id="loadButton" class="button" type="button">加载本地结果</button>
+      <button id="resetButton" class="button secondary" type="button">清除</button>
+    </section>
+
+    <section class="live-toolbar" aria-label="实时数据">
+      <label>
+        实时服务地址
+        <input id="liveUrl" value="http://127.0.0.1:8765/api/live" spellcheck="false">
+      </label>
+      <label>
+        刷新间隔
+        <select id="liveInterval">
+          <option value="10">10 秒</option>
+          <option value="30" selected>30 秒</option>
+          <option value="60">60 秒</option>
+        </select>
+      </label>
+      <button id="startLiveButton" class="button" type="button">开始实时监控</button>
+      <button id="stopLiveButton" class="button secondary" type="button" disabled>停止</button>
+      <span id="liveStatus" class="live-status">未连接本地实时服务</span>
+    </section>
+
+    <section id="emptyState" class="empty">
+      <div>
+        <h2>请选择 `hourly_market_test.csv`</h2>
+        <p>推荐只加载公开预测 CSV；私有结算明细仅在揭晓复盘时选择。</p>
+      </div>
+    </section>
+
+    <section id="liveWorkspace" class="hidden">
+      <div class="live-grid">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>实时市场状态</h2>
+              <div id="liveMarketMeta" class="market-meta">-</div>
+            </div>
+            <span id="liveQualityBadge" class="badge neutral">等待</span>
+          </div>
+          <div class="live-metrics">
+            <div class="live-metric"><span class="metric-label">当前周期已发推</span><strong id="liveCurrentCount">-</strong></div>
+            <div class="live-metric"><span class="metric-label">XTracker 刷新年龄</span><strong id="liveTrackerAge">-</strong></div>
+            <div class="live-metric"><span class="metric-label">模型预测结算数</span><strong id="liveForecastCount">-</strong></div>
+            <div class="live-metric"><span class="metric-label">盘口隐含期望</span><strong id="liveMarketExpected">-</strong></div>
+          </div>
+          <div class="section">
+            <div id="liveRecommendation" class="live-recommendation">
+              <strong id="liveRecommendationLabel">等待实时数据</strong>
+              <span id="liveRecommendationDetail">-</span>
+            </div>
+          </div>
+          <div class="section">
+            <h3>实时盘口与区间赔率</h3>
+            <div class="live-table-wrap">
+              <table>
+                <thead><tr><th>区间</th><th>买一</th><th>卖一</th><th>中间价</th><th>价差</th><th>近价深度</th></tr></thead>
+                <tbody id="liveOddsBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <aside class="panel">
+          <div class="panel-header">
+            <h2>外部信息</h2>
+            <span id="liveEventCount" class="badge neutral">0 个已批准事件</span>
+          </div>
+          <div class="signal">
+            <div class="signal-row"><span class="signal-key">TSLA 行情</span><span id="liveStock" class="signal-value">-</span></div>
+            <div class="signal-row"><span class="signal-key">预测区间</span><span id="liveForecastBin" class="signal-value">-</span></div>
+            <div class="signal-row"><span class="signal-key">预测区间概率</span><span id="liveForecastProbability" class="signal-value">-</span></div>
+            <div class="signal-row"><span class="signal-key">数据质量</span><span id="liveDataQuality" class="signal-value">-</span></div>
+          </div>
+          <div class="section">
+            <h3>已批准事件</h3>
+            <div id="liveEvents" class="live-list"></div>
+          </div>
+          <div class="section">
+            <h3>新闻上下文</h3>
+            <div id="liveNews" class="live-list"></div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section id="workspace" class="hidden">
+      <div class="modebar">
+        <button id="guessMode" class="mode-button active" type="button">竞猜模式</button>
+        <button id="reviewMode" class="mode-button" type="button">复盘模式</button>
+        <button id="revealButton" class="button secondary" type="button">揭晓结算</button>
+        <span id="modeNote" class="mode-note">实际结算值已锁定</span>
+      </div>
+
+      <div class="grid">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>当前盘口</h2>
+              <div id="marketMeta" class="market-meta">-</div>
+            </div>
+            <label style="min-width: 250px;">
+              选择市场
+              <select id="marketSelect"></select>
+            </label>
+          </div>
+
+          <div class="metrics">
+            <div class="metric">
+              <div class="metric-label">当前周期累计发帖</div>
+              <div id="currentCount" class="metric-value">-</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">已过小时</div>
+              <div id="elapsedHours" class="metric-value">-</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">预测结算总数</div>
+              <div id="forecastCount" class="metric-value">-</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">预测结果区间</div>
+              <div id="forecastBin" class="metric-value metric-small">-</div>
+            </div>
+          </div>
+
+          <div class="timeline">
+            <div class="timeline-line">
+              <span id="timelineStart">-</span>
+              <span id="timelineCursor">-</span>
+              <span id="timelineEnd">-</span>
+            </div>
+            <input id="hourSlider" type="range" min="0" max="0" value="0" step="1">
+          </div>
+
+          <div class="guess-box">
+            <div class="guess-title">本小时的猜谜结论</div>
+            <div id="guessMain" class="guess-main">等待数据</div>
+            <div id="guessDetail" class="guess-detail">模型会随着选择的小时和市场变化。</div>
+          </div>
+
+          <div class="section">
+            <h3>实际答案</h3>
+            <div id="answerLock" class="lock">已锁定。先记录你的方向判断，再点击“揭晓结算”。</div>
+            <div id="answerContent" class="review-grid hidden">
+              <div class="review-value"><span class="metric-label">本地最终观测</span><strong id="actualCount">-</strong></div>
+              <div class="review-value"><span class="metric-label">官方结算区间</span><strong id="resolvedBin">-</strong></div>
+              <div class="review-value"><span class="metric-label">预测绝对误差</span><strong id="absoluteError">-</strong></div>
+              <div class="review-value"><span class="metric-label">是否落入官方区间</span><strong id="binHit">-</strong></div>
+            </div>
+          </div>
+        </section>
+
+        <aside class="panel">
+          <div class="panel-header">
+            <h2>方向与风险</h2>
+            <span id="qualityBadge" class="badge neutral">等待</span>
+          </div>
+          <div class="signal">
+            <div class="signal-row"><span class="signal-key">模型相对盘口</span><span id="relativeSignal" class="signal-value">-</span></div>
+            <div class="signal-row"><span class="signal-key">纸面方向</span><span id="paperDirection" class="signal-value">-</span></div>
+            <div class="signal-row"><span class="signal-key">优势代理</span><span id="edgeProxy" class="signal-value">-</span></div>
+            <div class="signal-row"><span class="signal-key">盘口概率质量</span><span id="priceMass" class="signal-value">-</span></div>
+            <div class="signal-row"><span class="signal-key">训练市场数</span><span id="trainingWindows" class="signal-value">-</span></div>
+            <div class="signal-row"><span class="signal-key">数据建议</span><span id="riskDecision" class="signal-value">-</span></div>
+          </div>
+          <div class="section">
+            <h3>获利能力边界</h3>
+            <p>当前 CSV 没有逐区间可成交 bid/ask、手续费、深度和滑点，因此这里只给出方向与优势代理，不计算真实 PnL。真实下注前必须接入可成交价格和风险限额。</p>
+          </div>
+          <div class="section">
+            <h3>输入兼容</h3>
+            <p>页面按列名读取数据。新增列会被忽略，缺失的可选列显示为“-”；核心列为 `slug`、`checkpoint_utc`、`current_count`、`model_forecast_final_count`。</p>
+          </div>
+        </aside>
+      </div>
+
+      <section class="panel section">
+        <div class="panel-header">
+          <div>
+            <h2>整体准确性与纸面表现</h2>
+            <div class="market-meta">只有点击“揭晓结算”后才计算包含实际结果的指标。</div>
+          </div>
+        </div>
+        <div id="reviewLock" class="lock">复盘指标已锁定，避免先看到答案再判断预测。</div>
+        <div id="reviewContent" class="hidden">
+          <div class="review-grid">
+            <div class="review-value"><span class="metric-label">小时 MAE</span><strong id="overallMae">-</strong></div>
+            <div class="review-value"><span class="metric-label">官方区间命中率</span><strong id="overallHitRate">-</strong></div>
+            <div class="review-value"><span class="metric-label">方向判断准确率</span><strong id="directionAccuracy">-</strong></div>
+            <div class="review-value"><span class="metric-label">纸面优势代理</span><strong id="paperReturn">-</strong></div>
+            <div class="review-value"><span class="metric-label">Brier 分数</span><strong id="overallBrier">-</strong></div>
+            <div class="review-value"><span class="metric-label">LogLoss</span><strong id="overallLogLoss">-</strong></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>市场</th><th>小时数</th><th>MAE</th><th>官方区间</th><th>本地观测</th><th>质量</th></tr></thead>
+              <tbody id="summaryBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+      <p class="footer-note">这是研究和模拟工具，不构成投资建议。历史回放使用的本地帖子可能不完整，尤其不能自动还原被删除帖子。</p>
+    </section>
+  </main>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const state = {
+        rows: [],
+        privateRows: [],
+        summaries: [],
+        marketRows: new Map(),
+        market: "",
+        index: 0,
+        revealed: false,
+        mode: "guess",
+        liveTimer: null,
+        liveBusy: false,
+        livePayload: null
+      };
+
+      const $ = (id) => document.getElementById(id);
+      const text = (id, value) => { $(id).textContent = value == null || value === "" ? "-" : String(value); };
+      const number = (value) => {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : null;
+      };
+      const bool = (value) => value === true || String(value).toLowerCase() === "true";
+      const fmt = (value, digits = 1) => {
+        const parsed = number(value);
+        return parsed == null ? "-" : parsed.toFixed(digits);
+      };
+      const pct = (value, digits = 1) => {
+        const parsed = number(value);
+        return parsed == null ? "-" : `${(parsed * 100).toFixed(digits)}%`;
+      };
+
+      function parseCsv(source) {
+        const rows = [];
+        let row = [];
+        let cell = "";
+        let quoted = false;
+        for (let i = 0; i < source.length; i += 1) {
+          const char = source[i];
+          const next = source[i + 1];
+          if (quoted && char === '"' && next === '"') {
+            cell += '"';
+            i += 1;
+          } else if (char === '"') {
+            quoted = !quoted;
+          } else if (!quoted && char === ",") {
+            row.push(cell);
+            cell = "";
+          } else if (!quoted && (char === "\n" || char === "\r")) {
+            if (char === "\r" && next === "\n") i += 1;
+            row.push(cell);
+            if (row.some((item) => item.trim() !== "")) rows.push(row);
+            row = [];
+            cell = "";
+          } else {
+            cell += char;
+          }
+        }
+        if (cell !== "" || row.length > 0) {
+          row.push(cell);
+          if (row.some((item) => item.trim() !== "")) rows.push(row);
+        }
+        if (rows.length < 2) return [];
+        const headers = rows[0].map((value) => value.replace(/^\uFEFF/, "").trim());
+        return rows.slice(1).map((values) => headers.reduce((record, header, index) => {
+          record[header] = (values[index] || "").trim();
+          return record;
+        }, {}));
+      }
+
+      function readFile(input) {
+        return new Promise((resolve, reject) => {
+          const file = input.files && input.files[0];
+          if (!file) {
+            reject(new Error("没有选择文件"));
+            return;
+          }
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ""));
+          reader.onerror = () => reject(new Error("读取文件失败"));
+          reader.readAsText(file, "utf-8");
+        });
+      }
+
+      function rowTime(row) {
+        const value = Date.parse(row.checkpoint_utc || "");
+        return Number.isFinite(value) ? value : 0;
+      }
+
+      function loadRows(rows, privateRows) {
+        state.rows = rows
+          .filter((row) => row.slug && row.checkpoint_utc)
+          .sort((a, b) => rowTime(a) - rowTime(b));
+        state.privateRows = privateRows
+          .filter((row) => row.slug && row.checkpoint_utc)
+          .sort((a, b) => rowTime(a) - rowTime(b));
+        state.marketRows = new Map();
+        state.rows.forEach((row) => {
+          if (!state.marketRows.has(row.slug)) state.marketRows.set(row.slug, []);
+          state.marketRows.get(row.slug).push(row);
+        });
+        const markets = [...state.marketRows.keys()];
+        state.market = markets[0] || "";
+        state.index = 0;
+        $("marketSelect").innerHTML = markets.map((market) =>
+          `<option value="${escapeHtml(market)}">${escapeHtml(market)}</option>`).join("");
+        $("marketSelect").value = state.market;
+        $("emptyState").classList.toggle("hidden", markets.length > 0);
+        $("workspace").classList.toggle("hidden", markets.length === 0);
+        $("statusDot").classList.toggle("ready", markets.length > 0);
+        text("statusText", markets.length ? `已加载 ${markets.length} 个市场 / ${state.rows.length} 个小时` : "没有可用预测行");
+        update();
+      }
+
+      function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, (char) => ({
+          "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+        }[char]));
+      }
+
+      function renderLiveList(id, rows, emptyText) {
+        const items = Array.isArray(rows) ? rows : [];
+        if (!items.length) {
+          $(id).innerHTML = `<div class="live-list-item">${escapeHtml(emptyText)}</div>`;
+          return;
+        }
+        $(id).innerHTML = items.map((row) => {
+          const title = escapeHtml(row.title || row.summary || row.event_key || "未命名信息");
+          const source = escapeHtml(row.source || row.kind || "unknown");
+          const time = escapeHtml(row.published_at || row.occurred_at_utc || "-");
+          const link = row.url
+            ? `<a href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">${title}</a>`
+            : `<strong>${title}</strong>`;
+          const extra = row.model_input
+            ? ` · ${escapeHtml(row.direction || "neutral")} · 证据 ${escapeHtml(row.evidence_count || 0)}`
+            : "";
+          return `<div class="live-list-item">${link}<div class="live-list-meta">${source} · ${time}${extra}</div></div>`;
+        }).join("");
+      }
+
+      function renderLive(payload) {
+        if (!payload || !payload.count || !payload.prediction) return;
+        const count = payload.count;
+        const prediction = payload.prediction;
+        const market = payload.market || {};
+        const recommendation = payload.recommendation || {};
+        const stock = payload.stock || {};
+        $("liveWorkspace").classList.remove("hidden");
+        text("liveMarketMeta", `${payload.slug} · ${payload.window?.start_utc || "-"} → ${payload.window?.end_utc || "-"}`);
+        text("liveCurrentCount", count.current);
+        text("liveTrackerAge", count.tracker_refresh_age_seconds == null ? "-" : `${count.tracker_refresh_age_seconds}s`);
+        text("liveForecastCount", fmt(prediction.final_count));
+        text("liveMarketExpected", fmt(market.expected_count));
+        text("liveForecastBin", prediction.forecast_bin);
+        text("liveForecastProbability", pct(prediction.forecast_bin_probability));
+        const stockPrice = stock.price == null ? "-" : `${fmt(stock.price, 2)} ${stock.currency || ""} ${stock.change_pct == null ? "" : `(${pct(stock.change_pct)})`}`;
+        text("liveStock", stockPrice.trim());
+        const priceValid = Boolean(market.distribution_valid);
+        const trackerFresh = !count.stale;
+        const qualityGood = priceValid && trackerFresh && Array.isArray(market.outcomes) && market.outcomes.length > 0;
+        text("liveDataQuality", qualityGood ? "可用于纸面观察" : "不完整");
+        $("liveQualityBadge").className = `badge ${qualityGood ? "good" : "bad"}`;
+        text("liveQualityBadge", qualityGood ? "数据质量可用" : "数据质量不足");
+
+        const reasons = Array.isArray(recommendation.risk_reasons) ? recommendation.risk_reasons : [];
+        $("liveRecommendation").className = `live-recommendation ${reasons.length ? "" : "good"}`;
+        text("liveRecommendationLabel", recommendation.label || "不交易");
+        text("liveRecommendationDetail", reasons.length ? `风险门槛：${reasons.join("、")}` : "所有当前硬门槛通过，但只允许纸面观察，不执行交易。");
+        $("liveStatus").textContent = `已连接 · ${payload.generated_at_utc || "-"} · 纸面快照 #${payload.paper_forecast_id || "-"}${payload.errors?.length ? " · 部分数据源失败" : ""}`;
+        $("statusDot").classList.toggle("ready", true);
+        text("liveEventCount", `${Array.isArray(payload.approved_events) ? payload.approved_events.length : 0} 个已批准事件`);
+
+        $("liveOddsBody").innerHTML = (market.outcomes || []).map((row) => {
+          const depth = `${fmt(row.bid_depth_5, 1)} / ${fmt(row.ask_depth_5, 1)}`;
+          return `<tr><td>${escapeHtml(row.label || "-")}</td><td>${pct(row.best_bid)}</td><td>${pct(row.best_ask)}</td><td>${pct(row.midpoint)}</td><td>${pct(row.spread)}</td><td>${escapeHtml(depth)}</td></tr>`;
+        }).join("") || `<tr><td colspan="6">暂无可用订单簿</td></tr>`;
+        renderLiveList("liveEvents", payload.approved_events, "暂无通过硬规则的外部事件");
+        renderLiveList("liveNews", payload.news, "暂无新闻或新闻源不可用");
+      }
+
+      async function pullLive() {
+        if (state.liveBusy) return;
+        state.liveBusy = true;
+        try {
+          const response = await fetch($("liveUrl").value.trim(), { cache: "no-store" });
+          const payload = await response.json();
+          if (!response.ok || payload.ok === false) throw new Error(payload.message || "实时服务返回错误");
+          state.livePayload = payload;
+          renderLive(payload);
+        } catch (error) {
+          $("statusDot").classList.remove("ready");
+          $("liveStatus").textContent = `实时服务错误：${error.message}`;
+        } finally {
+          state.liveBusy = false;
+        }
+      }
+
+      function stopLive() {
+        if (state.liveTimer) clearInterval(state.liveTimer);
+        state.liveTimer = null;
+        $("startLiveButton").disabled = false;
+        $("stopLiveButton").disabled = true;
+        $("liveStatus").textContent = "实时监控已停止";
+      }
+
+      function startLive() {
+        stopLive();
+        $("liveWorkspace").classList.remove("hidden");
+        $("startLiveButton").disabled = true;
+        $("stopLiveButton").disabled = false;
+        pullLive();
+        state.liveTimer = setInterval(pullLive, Math.max(10, Number($("liveInterval").value) || 30) * 1000);
+      }
+
+      function currentRows() {
+        return state.marketRows.get(state.market) || [];
+      }
+
+      function currentRow() {
+        return currentRows()[state.index] || null;
+      }
+
+      function rowKey(row) {
+        return `${row.slug}|${row.checkpoint_utc}`;
+      }
+
+      function privateRowFor(row) {
+        const match = state.privateRows.find((candidate) => rowKey(candidate) === rowKey(row));
+        return match ? { ...row, ...match } : row;
+      }
+
+      function signalFor(row) {
+        const forecast = number(row.model_forecast_final_count);
+        const marketExpected = number(row.market_expected_count);
+        const mass = number(row.price_probability_mass);
+        const valid = bool(row.price_distribution_valid) && mass != null && mass >= 0.6 && mass <= 1.2;
+        const training = number(row.training_windows);
+        if (forecast == null || marketExpected == null || marketExpected <= 0) {
+          return { relative: "盘口不可用", direction: "观望", edge: null, valid, decision: "不交易" };
+        }
+        const difference = forecast - marketExpected;
+        const edge = Math.abs(difference) / Math.max(1, Math.abs(marketExpected));
+        const direction = difference > 5 ? "偏高" : difference < -5 ? "偏低" : "观望";
+        const decision = !valid || !training ? "不交易" : edge >= 0.08 ? `纸面${direction}` : "优势不足";
+        return { relative: `${difference >= 0 ? "+" : ""}${fmt(difference)} 个`, direction, edge, valid, decision };
+      }
+
+      function update() {
+        const rows = currentRows();
+        const row = privateRowFor(currentRow());
+        if (!row) return;
+        $("hourSlider").max = Math.max(0, rows.length - 1);
+        $("hourSlider").value = state.index;
+        text("marketMeta", `${row.slug} · ${rows.length} 个小时`);
+        text("currentCount", row.current_count);
+        text("elapsedHours", fmt(row.elapsed_hours, 0));
+        text("forecastCount", fmt(row.model_forecast_final_count));
+        text("forecastBin", row.forecast_bin);
+        text("timelineStart", rows[0]?.checkpoint_utc || "-");
+        text("timelineCursor", row.checkpoint_utc);
+        text("timelineEnd", rows[rows.length - 1]?.checkpoint_utc || "-");
+
+        const signal = signalFor(row);
+        text("relativeSignal", signal.relative);
+        text("paperDirection", signal.direction);
+        text("edgeProxy", signal.edge == null ? "-" : pct(signal.edge));
+        text("priceMass", row.price_probability_mass ? `${fmt(row.price_probability_mass, 3)} ${signal.valid ? "有效" : "异常"}` : "-");
+        text("trainingWindows", row.training_windows);
+        text("riskDecision", signal.decision);
+        $("qualityBadge").className = `badge ${signal.valid ? "good" : "bad"}`;
+        text("qualityBadge", signal.valid ? "盘口质量可用" : "盘口质量异常");
+
+        const marketLabel = signal.direction === "偏高" ? "模型认为结算总数偏高"
+          : signal.direction === "偏低" ? "模型认为结算总数偏低" : "模型与盘口接近";
+        text("guessMain", marketLabel);
+        const binProbability = number(row.forecast_bin_probability);
+        const probabilityText = binProbability == null ? "区间概率待模型提供" : `预测区间概率 ${pct(binProbability)}`;
+        text("guessDetail", `模型 ${fmt(row.model_forecast_final_count)} · 盘口隐含 ${fmt(row.market_expected_count)} · 当前累计 ${row.current_count || 0} · ${probabilityText}`);
+
+        const canShow = state.revealed;
+        $("answerLock").classList.toggle("hidden", canShow);
+        $("answerContent").classList.toggle("hidden", !canShow);
+        $("reviewLock").classList.toggle("hidden", canShow);
+        $("reviewContent").classList.toggle("hidden", !canShow);
+        if (canShow) {
+          text("actualCount", row.observed_local_final_count);
+          text("resolvedBin", row.resolved_bin);
+          text("absoluteError", row.absolute_error_to_observed_count);
+          const hit = bool(row.forecast_in_resolved_bin);
+          text("binHit", row.forecast_in_resolved_bin === "" ? "-" : (hit ? "命中" : "未命中"));
+          updateReview();
+        }
+        $("revealButton").disabled = state.privateRows.length === 0;
+        $("revealButton").textContent = state.revealed ? "隐藏结算" : "揭晓结算";
+        $("modeNote").textContent = state.revealed ? "复盘数据已揭晓" : "实际结算值已锁定";
+      }
+
+      function updateReview() {
+        if (!state.privateRows.length || !state.revealed) return;
+        const rows = state.privateRows.filter((row) => row.absolute_error_to_observed_count !== "");
+        const errors = rows.map((row) => number(row.absolute_error_to_observed_count)).filter((value) => value != null);
+        const hits = rows.filter((row) => row.forecast_in_resolved_bin !== "").map((row) => bool(row.forecast_in_resolved_bin));
+        const directionRows = rows.filter((row) => number(row.market_expected_count) != null && number(row.model_forecast_final_count) != null && number(row.observed_local_final_count) != null);
+        const directionHits = directionRows.filter((row) => {
+          const modelSide = Math.sign(number(row.model_forecast_final_count) - number(row.market_expected_count));
+          const actualSide = Math.sign(number(row.observed_local_final_count) - number(row.market_expected_count));
+          return modelSide !== 0 && modelSide === actualSide;
+        });
+        const paperReturns = directionRows.map((row) => {
+          const expected = Math.max(1, Math.abs(number(row.market_expected_count)));
+          const edge = Math.abs(number(row.model_forecast_final_count) - number(row.market_expected_count)) / expected;
+          const modelSide = Math.sign(number(row.model_forecast_final_count) - number(row.market_expected_count));
+          const actualSide = Math.sign(number(row.observed_local_final_count) - number(row.market_expected_count));
+          return modelSide !== 0 && modelSide === actualSide ? edge : -edge;
+        });
+        const brierScores = rows.map((row) => number(row.brier_score)).filter((value) => value != null);
+        const logLosses = rows.map((row) => number(row.log_loss)).filter((value) => value != null);
+        const mae = errors.length ? errors.reduce((sum, value) => sum + value, 0) / errors.length : null;
+        const hitRate = hits.length ? hits.filter(Boolean).length / hits.length : null;
+        const directionRate = directionRows.length ? directionHits.length / directionRows.length : null;
+        const paperReturn = paperReturns.length ? paperReturns.reduce((sum, value) => sum + value, 0) / paperReturns.length : null;
+        text("overallMae", fmt(mae, 2));
+        text("overallHitRate", pct(hitRate));
+        text("directionAccuracy", pct(directionRate));
+        text("paperReturn", pct(paperReturn));
+        text("overallBrier", fmt(brierScores.length ? brierScores.reduce((sum, value) => sum + value, 0) / brierScores.length : null, 4));
+        text("overallLogLoss", fmt(logLosses.length ? logLosses.reduce((sum, value) => sum + value, 0) / logLosses.length : null, 4));
+        const grouped = new Map();
+        state.privateRows.forEach((row) => {
+          if (!grouped.has(row.slug)) grouped.set(row.slug, []);
+          grouped.get(row.slug).push(row);
+        });
+        $("summaryBody").innerHTML = [...grouped.entries()].map(([slug, marketRows]) => {
+          const marketErrors = marketRows.map((row) => number(row.absolute_error_to_observed_count)).filter((value) => value != null);
+          const marketMae = marketErrors.length ? marketErrors.reduce((sum, value) => sum + value, 0) / marketErrors.length : null;
+          const verified = marketRows.every((row) => bool(row.observed_count_verified));
+          return `<tr><td>${escapeHtml(slug)}</td><td>${marketRows.length}</td><td>${fmt(marketMae, 2)}</td><td>${escapeHtml(marketRows[0].resolved_bin || "-")}</td><td>${escapeHtml(marketRows[0].observed_local_final_count || "-")}</td><td><span class="badge ${verified ? "good" : "warn"}">${verified ? "已核验" : "探索性"}</span></td></tr>`;
+        }).join("");
+      }
+
+      async function load() {
+        try {
+          const hourly = await readFile($("hourlyFile"));
+          const publicRows = parseCsv(hourly);
+          const privateRows = $("privateFile").files && $("privateFile").files[0]
+            ? parseCsv(await readFile($("privateFile"))) : (
+              publicRows.some((row) => row.observed_local_final_count !== "")
+                ? publicRows : []
+            );
+          const summary = $("summaryFile").files && $("summaryFile").files[0]
+            ? parseCsv(await readFile($("summaryFile"))) : [];
+          state.summaries = summary;
+          state.revealed = false;
+          state.mode = "guess";
+          $("guessMode").classList.add("active");
+          $("reviewMode").classList.remove("active");
+          loadRows(publicRows, privateRows);
+        } catch (error) {
+          text("statusText", error.message);
+          $("statusDot").classList.remove("ready");
+        }
+      }
+
+      $("loadButton").addEventListener("click", load);
+      $("resetButton").addEventListener("click", () => {
+        stopLive();
+        state.rows = [];
+        state.privateRows = [];
+        state.marketRows = new Map();
+        state.market = "";
+        state.revealed = false;
+        $("hourlyFile").value = "";
+        $("privateFile").value = "";
+        $("summaryFile").value = "";
+        $("workspace").classList.add("hidden");
+        $("emptyState").classList.remove("hidden");
+        $("statusDot").classList.remove("ready");
+        text("statusText", "等待载入本地 CSV");
+      });
+      $("startLiveButton").addEventListener("click", startLive);
+      $("stopLiveButton").addEventListener("click", stopLive);
+      $("marketSelect").addEventListener("change", (event) => {
+        state.market = event.target.value;
+        state.index = 0;
+        update();
+      });
+      $("hourSlider").addEventListener("input", (event) => {
+        state.index = Number(event.target.value);
+        update();
+      });
+      $("guessMode").addEventListener("click", () => {
+        state.mode = "guess";
+        $("guessMode").classList.add("active");
+        $("reviewMode").classList.remove("active");
+        state.revealed = false;
+        update();
+      });
+      $("reviewMode").addEventListener("click", () => {
+        state.mode = "review";
+        $("reviewMode").classList.add("active");
+        $("guessMode").classList.remove("active");
+        update();
+      });
+      $("revealButton").addEventListener("click", () => {
+        state.revealed = !state.revealed;
+        update();
+      });
+    })();
+  </script>
+</body>
+</html>

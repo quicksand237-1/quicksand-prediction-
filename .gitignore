@@ -1,0 +1,7 @@
+data/
+*.sqlite
+*.sqlite3
+*.db
+*.log
+__pycache__/
+*.pyc

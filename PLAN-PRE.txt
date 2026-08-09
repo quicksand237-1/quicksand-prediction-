@@ -1,0 +1,174 @@
+POLYMARKET COUNT MARKET PREDICTOR: IMPLEMENTATION PLAN
+
+0. Objective
+
+Build a reliable research and paper-trading system for seven-day social-post count
+markets. The system must estimate a final-count distribution, convert it into
+probabilities for every Polymarket outcome bin, compare those probabilities with
+tradable prices, and reject unsafe data or execution conditions.
+
+1. Data Reliability First
+
+1.1 Run the XTracker collector continuously during every active market.
+- Poll every 30 to 60 seconds.
+- Store every response, count sample, request timestamp, and source freshness.
+- Preserve post IDs, timestamps, post types, text, and raw source JSON.
+- Do not rely on a post-market export as the primary historical source.
+
+1.2 Add explicit source-quality fields.
+- Add per-window coverage status: verified, partial, stale, unknown.
+- Compare local final count with the resolved Polymarket bin after settlement.
+- Record missing-count lower and upper bounds when the local count is outside the bin.
+- Exclude partial or stale windows from default training and evaluation.
+
+1.3 Add independent reconciliation.
+- Use XTracker as settlement-aligned source.
+- Capture X public page or API observations as a secondary audit source when available.
+- Compare post IDs and timestamps between sources.
+- Store disagreements without overwriting the settlement-aligned source.
+
+2. Market Data and Microstructure
+
+2.1 Collect richer price data.
+- Store both Yes and No token data when available.
+- Collect best bid, best ask, spread, midpoint, last trade, depth, and volume.
+- Save every order-book snapshot with a capture timestamp.
+- Keep Gamma metadata, CLOB history, and live snapshots in separate tables.
+
+2.2 Validate the mutually exclusive outcome distribution.
+- Require a probability mass close to one after selecting one Yes price per bin.
+- Mark distributions outside configurable lower and upper mass limits invalid.
+- Detect missing bins, duplicate bins, stale bins, and inconsistent timestamps.
+- Use only synchronized or near-synchronized bins for market-implied features.
+
+2.3 Model transaction feasibility.
+- Estimate taker fee, maker rebate, slippage, spread crossing cost, and minimum size.
+- Reject a theoretical edge smaller than total execution cost plus uncertainty reserve.
+- Add liquidity and maximum position limits per outcome.
+
+3. Feature Engineering
+
+3.1 Posting-process features.
+- Current count, elapsed hours, remaining hours, and cumulative pace.
+- Rolling rates over 1, 3, 6, 12, 24, and 48 hours.
+- Inter-arrival-time features: mean, variance, burst score, and zero-post streak.
+- Time-of-day, day-of-week, market-start weekday, and daylight-saving indicators.
+
+3.2 Content and event features.
+- Classify observed posts into repost, quote, main post, reply-like, and uncertain.
+- Extract topic clusters from post text using a local or API-backed classifier.
+- Ingest structured external events: launches, earnings, policy, litigation, conflicts,
+  product announcements, elections, travel, and major news.
+- Use time-decayed event impacts instead of only cumulative event counts.
+
+3.3 Market features.
+- Market-implied expected count, entropy, concentration, and bin-level skew.
+- Price changes, order-flow imbalance, spread, depth, and volume acceleration.
+- Difference between process-model prediction and market-implied prediction.
+- Historical calibration error by elapsed-hour bucket.
+
+4. Statistical Models
+
+4.1 Keep the existing ridge model as a baseline.
+- Retrain it on verified data only.
+- Use purged chronological splits because adjacent seven-day windows overlap.
+- Report MAE, RMSE, bin accuracy, calibration, and error by elapsed-hour bucket.
+
+4.2 Add count-distribution models.
+- Negative-binomial regression for overdispersed counts.
+- Piecewise Poisson or negative-binomial model for remaining posts.
+- Zero-inflated component for inactive periods.
+- Hierarchical weekday and hour-of-day effects.
+
+4.3 Add self-exciting burst models.
+- Fit a Hawkes-style intensity model or a simpler burst-state model.
+- Increase short-horizon intensity after clustered posts.
+- Decay burst intensity over time and bound it to prevent unstable forecasts.
+
+4.4 Add Bayesian uncertainty.
+- Treat true count as latent when source coverage is incomplete.
+- Use settlement bins as interval-censored observations for historical markets.
+- Produce posterior samples of final count rather than only one point estimate.
+- Convert samples to outcome-bin probabilities directly.
+
+4.5 Combine models.
+- Blend ridge, count-process, burst, and market-implied forecasts.
+- Learn blend weights on a rolling validation set.
+- Penalize models that are poorly calibrated even when point MAE is low.
+
+5. Evaluation Design
+
+5.1 Walk-forward evaluation.
+- For each target market, train only on earlier windows that end before its start.
+- Purge any training market overlapping the target interval.
+- Refit feature normalization and model parameters inside each walk-forward fold.
+
+5.2 Hourly replay.
+- Generate predictions every hour from hour one to the market end.
+- Save predicted final distribution, bin probabilities, observed local count, resolved bin,
+  source quality, and market data quality.
+- Report error curves over elapsed time, not only final aggregate metrics.
+
+5.3 Calibration evaluation.
+- For every predicted bin probability, group predictions into probability buckets.
+- Compare predicted probability with realized bin frequency.
+- Report Brier score, log loss, expected calibration error, and reliability plots.
+
+6. Trading Decision Layer
+
+6.1 Convert final-count distribution to tradable probability.
+- Sum probability mass within each market outcome range.
+- For open-ended bins, integrate the distribution tail rather than using a midpoint.
+- Use bid price for sell decisions and ask price for buy decisions.
+
+6.2 Define edge and no-trade rules.
+- edge = model_probability - executable_buy_price for a Yes purchase.
+- Require edge above fees, spread, slippage, model uncertainty, and a safety margin.
+- Reject trades when source freshness, price synchronization, or liquidity fails.
+- Reject trades near settlement if the source may still miss recently deleted posts.
+
+6.3 Risk limits.
+- Maximum position per market, per bin, and correlated overlapping window group.
+- Daily loss cap, drawdown cap, and order-rate cap.
+- Kill switch for API errors, stale data, abnormal price mass, or model drift.
+- Default to paper trading until walk-forward and calibration targets are met.
+
+7. Storage and Operations
+
+7.1 Schema additions.
+- Add order_book_snapshots, source_audits, model_runs, hourly_forecasts,
+  paper_orders, paper_fills, and risk_events tables.
+- Version all models, feature definitions, code revision, and training datasets.
+
+7.2 Scheduled jobs.
+- Active market collector: 30 to 60 seconds.
+- Price and order-book collector: 10 to 30 seconds when liquid.
+- Feature and forecast job: every hour, plus event-triggered refresh.
+- Settlement reconciliation job: after market resolution and again after 24 hours.
+
+7.3 Observability.
+- Write structured JSON logs for every request, forecast, rejection, and order.
+- Export daily data-quality and model-quality summaries.
+- Alert on stale source, price mass anomaly, repeated API failure, or large forecast drift.
+
+8. Implementation Sequence
+
+Step A: Add source coverage and settlement-reconciliation tables and reports.
+Step B: Run continuous collection for several active markets before changing models.
+Step C: Add synchronized CLOB order-book snapshots and price-quality validation.
+Step D: Expand hourly replay to save full bin probabilities and calibration metrics.
+Step E: Implement negative-binomial remaining-count model and compare with ridge.
+Step F: Implement interval-censored Bayesian model for resolved-bin historical labels.
+Step G: Add paper-trading simulator with fees, spreads, liquidity, and risk limits.
+Step H: Run a multi-market walk-forward paper-trading period and review calibration.
+Step I: Consider limited live execution only after documented safety and performance gates pass.
+
+9. Acceptance Gates
+
+- No automatic trading with stale, partial, unverified, or unsynchronized data.
+- Every model run is reproducible from saved database rows and model metadata.
+- Walk-forward evaluation uses no overlapping or future labels.
+- Bin probabilities are calibrated, not only accurate as point forecasts.
+- Simulated expected edge remains positive after realistic fees and slippage.
+- Paper-trading risk controls operate correctly during source and API failures.
+
