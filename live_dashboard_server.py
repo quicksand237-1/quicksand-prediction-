@@ -39,6 +39,7 @@ from polymarket_pipeline import (
     count_distribution,
     market_features,
     outcome_label_for_count,
+    parse_timestamp,
     price_distribution_is_valid,
     prior_rate_for_windows,
     utc_now,
@@ -50,6 +51,7 @@ DEFAULT_NEWS_FEED = (
     "https://news.google.com/rss/search?"
     "q=Elon+Musk+Tesla+SpaceX+xAI&hl=en-US&gl=US&ceid=US:en"
 )
+LIVE_SERVICE_VERSION = "2026-08-11-paper-trades-v2"
 
 
 def parse_float(value: Any) -> float | None:
@@ -87,6 +89,20 @@ def parse_levels(book: dict[str, Any]) -> tuple[float | None, float | None, floa
     bid_depth = sum(size for price, size in bids if best_bid is not None and price >= best_bid - 0.05)
     ask_depth = sum(size for price, size in asks if best_ask is not None and price <= best_ask + 0.05)
     return best_bid, best_ask, midpoint, bid_depth, ask_depth
+
+
+def paper_buy_cost(
+    best_ask: float | None,
+    fee_rate: float,
+    slippage_bps: float,
+) -> tuple[float | None, float | None]:
+    """Return the per-share price and fee used by the local paper simulator."""
+    if best_ask is None or not 0 <= best_ask <= 1:
+        return None, None
+    slippage = max(0.0, slippage_bps) / 10000.0
+    executable = min(1.0, best_ask + slippage)
+    fee = best_ask * max(0.0, fee_rate)
+    return executable, fee
 
 
 class WebFetcher:
@@ -369,6 +385,8 @@ class LiveService:
         books: list[dict[str, Any]],
         tracker_age: int | None,
         training_windows: int,
+        paper_candidate: dict[str, Any] | None,
+        ranges_complete: bool,
     ) -> dict[str, Any]:
         reasons: list[str] = []
         if now < window.start_utc or now >= window.end_utc:
@@ -379,30 +397,82 @@ class LiveService:
             reasons.append("no_live_orderbook")
         if not price_valid:
             reasons.append("incomplete_or_invalid_odds")
+        if not ranges_complete:
+            reasons.append("missing_outcome_orderbooks")
         if training_windows < self.args.min_training_windows:
             reasons.append("insufficient_training_windows")
-        edge = None
-        if market_expected > 0:
-            edge = abs(forecast - market_expected) / market_expected
-            if edge < self.args.min_edge:
-                reasons.append("edge_below_threshold")
+        edge = paper_candidate.get("edge_after_cost") if paper_candidate else None
+        if paper_candidate is None:
+            reasons.append("no_executable_candidate")
+        else:
+            if paper_candidate.get("spread") is None:
+                reasons.append("missing_best_bid_or_ask")
+            elif paper_candidate["spread"] > self.args.max_spread:
+                reasons.append("spread_above_threshold")
+            if paper_candidate.get("book_age_seconds") is None or paper_candidate["book_age_seconds"] > self.args.max_book_age:
+                reasons.append("orderbook_refresh_stale")
+            if (paper_candidate.get("available_depth") or 0) < self.args.paper_size * self.args.min_depth_multiple:
+                reasons.append("insufficient_ask_depth")
+            if edge is None or edge < self.args.min_edge:
+                reasons.append("edge_after_cost_below_threshold")
+        label = "不交易" if reasons else "纸面方向研究"
         return {
-            "label": "不交易" if reasons else "仅纸面观察",
+            "label": label,
             "paper_direction": (
-                "偏高" if forecast - market_expected > 5
-                else "偏低" if forecast - market_expected < -5
+                f"买入 Yes · {paper_candidate['label']}"
+                if paper_candidate and not reasons
                 else "观望"
-            ) if market_expected > 0 else "观望",
+            ),
             "edge_proxy": edge,
+            "edge_after_cost": edge,
+            "candidate": paper_candidate,
             "risk_reasons": reasons,
             "do_not_auto_trade": True,
             "basis": [
-                "模型预测与盘口中间价比较",
-                "XTracker 数据新鲜度",
+                "模型区间概率与 Yes 卖一可成交价格比较",
+                "手续费和滑点采用本地保守假设",
+                "XTracker 和 CLOB 数据新鲜度",
                 "来源事件仅使用 approved 记录",
                 "未建模的原始新闻不会直接改变预测",
             ],
         }
+
+    def _paper_candidate(
+        self,
+        probabilities: list[float],
+        books: list[dict[str, Any]],
+        now: dt.datetime,
+    ) -> dict[str, Any] | None:
+        candidates: list[dict[str, Any]] = []
+        for index, book in enumerate(books):
+            if index >= len(probabilities):
+                continue
+            ask = parse_float(book.get("best_ask"))
+            model_probability = parse_float(probabilities[index])
+            if ask is None or model_probability is None:
+                continue
+            executable, fee_per_share = paper_buy_cost(
+                ask, self.args.paper_fee_rate, self.args.paper_slippage_bps
+            )
+            if executable is None or fee_per_share is None:
+                continue
+            captured = parse_timestamp(book.get("captured_at_utc"))
+            age = max(0, int((now - captured).total_seconds())) if captured else None
+            spread = parse_float(book.get("spread"))
+            candidates.append({
+                "market_id": book.get("market_id"),
+                "label": book.get("label"),
+                "model_probability": round(model_probability, 6),
+                "best_bid": parse_float(book.get("best_bid")),
+                "best_ask": ask,
+                "executable_price": round(executable, 6),
+                "fee_per_share": round(fee_per_share, 6),
+                "spread": spread,
+                "available_depth": parse_float(book.get("ask_depth_5")),
+                "book_age_seconds": age,
+                "edge_after_cost": round(model_probability - executable - fee_per_share, 6),
+            })
+        return max(candidates, key=lambda item: item["edge_after_cost"], default=None)
 
     def refresh(self, force: bool = False) -> dict[str, Any]:
         with self.lock:
@@ -498,6 +568,9 @@ class LiveService:
                 else None
             )
             price_valid = price_distribution_is_valid(features[8])
+            books.sort(key=lambda item: item["lower"] if item["lower"] is not None else 10**9)
+            paper_candidate = self._paper_candidate(probabilities, books, now)
+            ranges_complete = len(books) == len(ranges)
             training_windows = len([
                 candidate for candidate in self.store.windows()
                 if candidate.end_utc <= window.start_utc
@@ -513,13 +586,42 @@ class LiveService:
                 books=books,
                 tracker_age=tracker_age,
                 training_windows=training_windows,
+                paper_candidate=paper_candidate,
+                ranges_complete=ranges_complete,
             )
             events = self._approved_events(now)
             news = self._fetch_news(now)
             stock = self._fetch_stock(now)
             for row in events:
                 row["model_input"] = True
+            outcome_payload: list[dict[str, Any]] = []
+            for index, book in enumerate(books):
+                model_probability = (
+                    round(probabilities[index], 6) if index < len(probabilities) else None
+                )
+                executable, fee = paper_buy_cost(
+                    parse_float(book.get("best_ask")),
+                    self.args.paper_fee_rate,
+                    self.args.paper_slippage_bps,
+                )
+                edge_after_cost = (
+                    model_probability - executable - fee
+                    if model_probability is not None and executable is not None and fee is not None
+                    else None
+                )
+                outcome_payload.append({
+                    **book,
+                    "model_probability": model_probability,
+                    "paper_executable_price": round(executable, 6) if executable is not None else None,
+                    "paper_fee_per_share": round(fee, 6) if fee is not None else None,
+                    "paper_edge_after_cost": round(edge_after_cost, 6)
+                    if edge_after_cost is not None else None,
+                    "paper_candidate": bool(
+                        paper_candidate and paper_candidate.get("label") == book.get("label")
+                    ),
+                })
             self.last_snapshot = {
+                "service_version": LIVE_SERVICE_VERSION,
                 "generated_at_utc": now.isoformat(),
                 "slug": self.args.slug,
                 "window": {
@@ -536,6 +638,7 @@ class LiveService:
                 },
                 "prediction": {
                     "final_count": round(forecast, 2),
+                    "final_count_rounded": int(round(forecast)),
                     "forecast_bin": forecast_bin,
                     "forecast_bin_probability": bin_probability,
                     "variance": variance_source,
@@ -546,8 +649,14 @@ class LiveService:
                     "expected_count": round(float(features[7]), 2),
                     "probability_mass": round(float(features[8]), 4),
                     "distribution_valid": price_valid,
-                    "outcomes": books,
-                    "quote_basis": "CLOB midpoint; executable ask is shown separately",
+                    "outcomes": outcome_payload,
+                    "quote_basis": "CLOB best ask is the paper Yes entry quote; midpoint is context only",
+                    "paper_cost_assumptions": {
+                        "fee_rate": self.args.paper_fee_rate,
+                        "slippage_bps": self.args.paper_slippage_bps,
+                        "paper_size": self.args.paper_size,
+                        "min_depth_multiple": self.args.min_depth_multiple,
+                    },
                 },
                 "stock": stock,
                 "news": news,
@@ -571,6 +680,41 @@ class LiveService:
                 risk_reasons=list(recommendation["risk_reasons"]),
                 snapshot=self.last_snapshot,
             )
+            trade_id = None
+            if paper_candidate is not None:
+                filled = min(
+                    1.0,
+                    max(0.0, float(paper_candidate.get("available_depth") or 0.0))
+                    / max(self.args.paper_size, 1e-9),
+                ) if not recommendation["risk_reasons"] else 0.0
+                status = "paper_filled" if filled > 0 else "no_trade"
+                fee_total = (
+                    self.args.paper_size * filled * paper_candidate["fee_per_share"]
+                )
+                trade_id = self.store.save_paper_trade(
+                    created_at_utc=now,
+                    event_slug=self.args.slug,
+                    outcome_label=str(paper_candidate["label"]),
+                    side="yes",
+                    model_probability=float(paper_candidate["model_probability"]),
+                    quoted_best_bid=paper_candidate.get("best_bid"),
+                    quoted_best_ask=paper_candidate.get("best_ask"),
+                    executable_price=paper_candidate.get("executable_price"),
+                    spread=paper_candidate.get("spread"),
+                    available_depth=paper_candidate.get("available_depth"),
+                    requested_size=self.args.paper_size,
+                    fill_fraction=filled,
+                    fee_rate=self.args.paper_fee_rate,
+                    slippage_bps=self.args.paper_slippage_bps,
+                    estimated_fee=fee_total,
+                    status=status,
+                    recommendation=str(recommendation["label"]),
+                    edge_after_cost=recommendation.get("edge_after_cost"),
+                    risk_reasons=list(recommendation["risk_reasons"]),
+                    snapshot={"recommendation": recommendation, "market": self.last_snapshot["market"]},
+                )
+            self.store.settle_paper_trades(self.args.slug)
+            self.last_snapshot["paper_trade_id"] = trade_id
             self.last_snapshot["paper_forecast_id"] = paper_forecast_id
             self.last_refresh = now
             return self.last_snapshot
@@ -608,6 +752,40 @@ class LiveService:
                 for row in rows
             ]
 
+    def paper_trades(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self.lock:
+            rows = self.store.conn.execute(
+                """
+                select id, created_at_utc, event_slug, outcome_label, side,
+                       model_probability, quoted_best_bid, quoted_best_ask,
+                       executable_price, spread, available_depth, requested_size,
+                       fill_fraction, fee_rate, slippage_bps, status,
+                       recommendation, edge_after_cost, resolved_yes,
+                       settlement_price, gross_pnl, net_pnl, risk_reasons
+                from paper_trades
+                where event_slug = ?
+                order by created_at_utc desc
+                limit ?
+                """,
+                (self.args.slug, max(1, min(500, int(limit)))),
+            ).fetchall()
+            return [
+                {
+                    "id": row[0], "created_at_utc": row[1], "slug": row[2],
+                    "outcome_label": row[3], "side": row[4],
+                    "model_probability": row[5], "best_bid": row[6],
+                    "best_ask": row[7], "executable_price": row[8],
+                    "spread": row[9], "available_depth": row[10],
+                    "requested_size": row[11], "fill_fraction": row[12],
+                    "fee_rate": row[13], "slippage_bps": row[14],
+                    "status": row[15], "recommendation": row[16],
+                    "edge_after_cost": row[17], "resolved_yes": row[18],
+                    "settlement_price": row[19], "gross_pnl": row[20],
+                    "net_pnl": row[21], "risk_reasons": json.loads(row[22]) if row[22] else [],
+                }
+                for row in rows
+            ]
+
 
 class DashboardHandler(BaseHTTPRequestHandler):
     service: LiveService
@@ -631,7 +809,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send(500, str(exc).encode("utf-8"), "text/plain; charset=utf-8")
             return
         if path == "/api/health":
-            self._send(200, b'{"ok":true}', "application/json; charset=utf-8")
+            body = json.dumps({
+                "ok": True,
+                "service": "live_dashboard_server",
+                "version": LIVE_SERVICE_VERSION,
+                "do_not_auto_trade": True,
+            }, ensure_ascii=False).encode("utf-8")
+            self._send(200, body, "application/json; charset=utf-8")
             return
         if path == "/api/live":
             try:
@@ -664,6 +848,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except (TypeError, ValueError) as exc:
                 self._send(400, str(exc).encode("utf-8"), "text/plain; charset=utf-8")
             return
+        if path == "/api/paper-trades":
+            try:
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                limit = int(query.get("limit", ["100"])[0])
+                body = json.dumps(
+                    self.service.paper_trades(limit),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                self._send(200, body, "application/json; charset=utf-8")
+            except (TypeError, ValueError) as exc:
+                self._send(400, str(exc).encode("utf-8"), "text/plain; charset=utf-8")
+            return
         self._send(404, b"Not found", "text/plain; charset=utf-8")
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -682,6 +878,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-tracker-age", type=int, default=120)
     parser.add_argument("--max-price-age-hours", type=float, default=1)
     parser.add_argument("--min-edge", type=float, default=0.08)
+    parser.add_argument("--max-spread", type=float, default=0.04)
+    parser.add_argument("--max-book-age", type=int, default=30)
+    parser.add_argument("--paper-size", type=float, default=1.0)
+    parser.add_argument("--min-depth-multiple", type=float, default=3.0)
+    parser.add_argument("--paper-fee-rate", type=float, default=0.02)
+    parser.add_argument("--paper-slippage-bps", type=float, default=50.0)
     parser.add_argument("--min-training-windows", type=int, default=10)
     parser.add_argument("--book-workers", type=int, default=8)
     parser.add_argument("--stock-symbol", default="TSLA")

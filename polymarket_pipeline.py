@@ -495,6 +495,34 @@ class MarketStore(PostStore):
                 snapshot_json text not null
             );
 
+            create table if not exists paper_trades (
+                id integer primary key autoincrement,
+                created_at_utc text not null,
+                event_slug text not null,
+                outcome_label text not null,
+                side text not null,
+                model_probability real not null,
+                quoted_best_bid real,
+                quoted_best_ask real,
+                executable_price real,
+                spread real,
+                available_depth real,
+                requested_size real not null,
+                fill_fraction real not null default 0,
+                fee_rate real not null,
+                slippage_bps real not null,
+                estimated_fee real not null default 0,
+                status text not null,
+                recommendation text not null,
+                edge_after_cost real,
+                resolved_yes integer,
+                settlement_price real,
+                gross_pnl real,
+                net_pnl real,
+                risk_reasons text not null,
+                snapshot_json text not null
+            );
+
             create index if not exists idx_market_prices_lookup
                 on market_prices(event_slug, price_time_utc);
             create index if not exists idx_external_events_time
@@ -505,6 +533,8 @@ class MarketStore(PostStore):
                 on event_evidence(event_key, published_at_utc);
             create index if not exists idx_paper_forecasts_event_time
                 on paper_forecasts(event_slug, captured_at_utc);
+            create index if not exists idx_paper_trades_event_time
+                on paper_trades(event_slug, created_at_utc);
             """
         )
         self.conn.executemany(
@@ -726,6 +756,104 @@ class MarketStore(PostStore):
         )
         self.conn.commit()
         return int(cursor.lastrowid)
+
+    def save_paper_trade(
+        self,
+        *,
+        created_at_utc: dt.datetime,
+        event_slug: str,
+        outcome_label: str,
+        side: str,
+        model_probability: float,
+        quoted_best_bid: float | None,
+        quoted_best_ask: float | None,
+        executable_price: float | None,
+        spread: float | None,
+        available_depth: float | None,
+        requested_size: float,
+        fill_fraction: float,
+        fee_rate: float,
+        slippage_bps: float,
+        estimated_fee: float,
+        status: str,
+        recommendation: str,
+        edge_after_cost: float | None,
+        risk_reasons: list[str],
+        snapshot: dict[str, Any],
+    ) -> int:
+        cursor = self.conn.execute(
+            """
+            insert into paper_trades (
+                created_at_utc, event_slug, outcome_label, side,
+                model_probability, quoted_best_bid, quoted_best_ask,
+                executable_price, spread, available_depth, requested_size,
+                fill_fraction, fee_rate, slippage_bps, estimated_fee, status,
+                recommendation, edge_after_cost, risk_reasons, snapshot_json
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                created_at_utc.isoformat(),
+                event_slug,
+                outcome_label,
+                side,
+                model_probability,
+                quoted_best_bid,
+                quoted_best_ask,
+                executable_price,
+                spread,
+                available_depth,
+                requested_size,
+                max(0.0, min(1.0, fill_fraction)),
+                fee_rate,
+                slippage_bps,
+                estimated_fee,
+                status,
+                recommendation,
+                edge_after_cost,
+                json_dumps(risk_reasons),
+                json_dumps(snapshot),
+            ),
+        )
+        self.conn.commit()
+        return int(cursor.lastrowid)
+
+    def settle_paper_trades(self, event_slug: str) -> int:
+        """Settle filled paper YES entries when the local market outcome is known."""
+        rows = self.conn.execute(
+            """
+            select id, outcome_label, executable_price, requested_size,
+                   fill_fraction, estimated_fee
+            from paper_trades
+            where event_slug = ? and status = 'paper_filled' and resolved_yes is null
+            """,
+            (event_slug,),
+        ).fetchall()
+        updated = 0
+        with self.conn:
+            for row in rows:
+                outcome = self.conn.execute(
+                    """
+                    select resolved_yes from market_outcomes
+                    where event_slug = ? and label = ?
+                    """,
+                    (event_slug, row[1]),
+                ).fetchone()
+                if outcome is None or outcome[0] is None:
+                    continue
+                settlement = 1.0 if int(outcome[0]) else 0.0
+                filled = float(row[3]) * float(row[4])
+                gross = filled * (settlement - float(row[2]))
+                net = gross - float(row[5])
+                self.conn.execute(
+                    """
+                    update paper_trades
+                    set resolved_yes = ?, settlement_price = ?, gross_pnl = ?, net_pnl = ?, status = 'settled'
+                    where id = ?
+                    """,
+                    (int(outcome[0]), settlement, gross, net, row[0]),
+                )
+                updated += 1
+        return updated
 
     def save_external_events(self, path: Path, timezone: str) -> int:
         inserted = 0
@@ -1759,7 +1887,7 @@ def write_hourly_test_reports(
         "observed_count_verified", "absolute_error_to_observed_count",
         "market_expected_count", "price_probability_mass", "price_distribution_valid", "training_windows",
         "model_source", "prediction_variance", "forecast_bin_probability",
-        "resolved_bin_probability", "brier_score", "log_loss",
+        "resolved_bin_probability", "bin_probabilities_json", "brier_score", "log_loss",
     ]
     summary_fields = [
         "slug", "status", "hourly_predictions", "training_windows", "model_source",
@@ -1782,6 +1910,7 @@ def write_hourly_test_reports(
             "model_forecast_final_count", "forecast_bin", "market_expected_count",
             "price_probability_mass", "price_distribution_valid", "training_windows",
             "model_source", "prediction_variance", "forecast_bin_probability",
+            "bin_probabilities_json",
         ]
         public_report_path.parent.mkdir(parents=True, exist_ok=True)
         with public_report_path.open("w", newline="", encoding="utf-8") as file:
@@ -1938,6 +2067,10 @@ def hourly_test_command(args: argparse.Namespace) -> None:
                     if forecast_probability is not None else None,
                     "resolved_bin_probability": round(resolved_probability, 6)
                     if resolved_probability is not None else None,
+                    "bin_probabilities_json": json_dumps({
+                        label: round(probability, 6)
+                        for (label, _, _), probability in zip(ranges, probabilities)
+                    }),
                     "brier_score": round(brier_score, 6) if brier_score is not None else None,
                     "log_loss": round(log_loss, 6) if log_loss is not None else None,
                 })

@@ -302,6 +302,13 @@
     .live-list-item a { color: var(--accent); text-decoration: none; }
     .live-list-meta { color: var(--muted); font-size: 11px; margin-top: 3px; }
     .live-table-wrap { max-height: 320px; overflow: auto; }
+    .chart-wrap { margin-top: 12px; }
+    #historyChart { display: block; width: 100%; height: 280px; background: #fbfcfd; border: 1px solid var(--line); }
+    .chart-legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+    .legend-prediction::before, .legend-current::before, .legend-actual::before { content: ""; display: inline-block; width: 18px; height: 3px; margin: 0 5px 3px 0; }
+    .legend-prediction::before { background: #1e6fa8; }
+    .legend-current::before { background: #2f8f67; }
+    .legend-actual::before { background: #b34b4b; }
     .live-recommendation {
       padding: 12px;
       border-left: 3px solid var(--warn);
@@ -393,7 +400,7 @@
           <div class="live-metrics">
             <div class="live-metric"><span class="metric-label">当前周期已发推</span><strong id="liveCurrentCount">-</strong></div>
             <div class="live-metric"><span class="metric-label">XTracker 刷新年龄</span><strong id="liveTrackerAge">-</strong></div>
-            <div class="live-metric"><span class="metric-label">模型预测结算数</span><strong id="liveForecastCount">-</strong></div>
+            <div class="live-metric"><span class="metric-label">模型预测结算数（期望值）</span><strong id="liveForecastCount">-</strong></div>
             <div class="live-metric"><span class="metric-label">盘口隐含期望</span><strong id="liveMarketExpected">-</strong></div>
           </div>
           <div class="section">
@@ -406,8 +413,17 @@
             <h3>实时盘口与区间赔率</h3>
             <div class="live-table-wrap">
               <table>
-                <thead><tr><th>区间</th><th>买一</th><th>卖一</th><th>中间价</th><th>价差</th><th>近价深度</th></tr></thead>
+                <thead><tr><th>区间</th><th>模型概率</th><th>买一</th><th>卖一</th><th>纸面可执行价</th><th>成本后 edge</th><th>价差</th><th>近价深度</th></tr></thead>
                 <tbody id="liveOddsBody"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="section">
+            <h3>最近纸面记录</h3>
+            <div class="live-table-wrap">
+              <table>
+                <thead><tr><th>时间</th><th>区间</th><th>状态</th><th>成本后 edge</th><th>净结果</th></tr></thead>
+                <tbody id="livePaperTradesBody"></tbody>
               </table>
             </div>
           </div>
@@ -489,6 +505,25 @@
             <div class="guess-title">本小时的猜谜结论</div>
             <div id="guessMain" class="guess-main">等待数据</div>
             <div id="guessDetail" class="guess-detail">模型会随着选择的小时和市场变化。</div>
+          </div>
+
+          <div class="section">
+            <h3>完整结算区间概率</h3>
+            <div class="live-table-wrap">
+              <table>
+                <thead><tr><th>结算区间</th><th>模型概率</th></tr></thead>
+                <tbody id="binProbabilityBody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="section">
+            <h3>小时累计走势</h3>
+            <div class="chart-wrap">
+              <canvas id="historyChart" height="280"></canvas>
+              <div class="chart-legend"><span class="legend-prediction">模型预测最终数</span><span class="legend-current">当时已观察累计数</span><span id="revealedLegend" class="legend-actual hidden">揭晓后的本地最终观测</span></div>
+              <div id="chartNote" class="market-meta">选择市场后显示历史走势。</div>
+            </div>
           </div>
 
           <div class="section">
@@ -709,7 +744,7 @@
         text("liveMarketMeta", `${payload.slug} · ${payload.window?.start_utc || "-"} → ${payload.window?.end_utc || "-"}`);
         text("liveCurrentCount", count.current);
         text("liveTrackerAge", count.tracker_refresh_age_seconds == null ? "-" : `${count.tracker_refresh_age_seconds}s`);
-        text("liveForecastCount", fmt(prediction.final_count));
+        text("liveForecastCount", prediction.final_count == null ? "-" : `${fmt(prediction.final_count, 2)}（约${prediction.final_count_rounded ?? Math.round(Number(prediction.final_count))}）`);
         text("liveMarketExpected", fmt(market.expected_count));
         text("liveForecastBin", prediction.forecast_bin);
         text("liveForecastProbability", pct(prediction.forecast_bin_probability));
@@ -725,25 +760,42 @@
         const reasons = Array.isArray(recommendation.risk_reasons) ? recommendation.risk_reasons : [];
         $("liveRecommendation").className = `live-recommendation ${reasons.length ? "" : "good"}`;
         text("liveRecommendationLabel", recommendation.label || "不交易");
-        text("liveRecommendationDetail", reasons.length ? `风险门槛：${reasons.join("、")}` : "所有当前硬门槛通过，但只允许纸面观察，不执行交易。");
-        $("liveStatus").textContent = `已连接 · ${payload.generated_at_utc || "-"} · 纸面快照 #${payload.paper_forecast_id || "-"}${payload.errors?.length ? " · 部分数据源失败" : ""}`;
+        const candidate = recommendation.candidate || {};
+        const candidateText = candidate.label ? `候选 ${candidate.label} · 成本后 edge ${pct(candidate.edge_after_cost)}` : "无可执行区间候选";
+        text("liveRecommendationDetail", reasons.length ? `风险门槛：${reasons.join("、")} · ${candidateText}` : `${candidateText} · 只允许纸面观察，不执行交易。`);
+        $("liveStatus").textContent = `已连接 · 服务 ${payload.service_version || "旧版本"} · ${payload.generated_at_utc || "-"} · 纸面快照 #${payload.paper_forecast_id || "-"}${payload.errors?.length ? " · 部分数据源失败" : ""}`;
         $("statusDot").classList.toggle("ready", true);
         text("liveEventCount", `${Array.isArray(payload.approved_events) ? payload.approved_events.length : 0} 个已批准事件`);
 
         $("liveOddsBody").innerHTML = (market.outcomes || []).map((row) => {
           const depth = `${fmt(row.bid_depth_5, 1)} / ${fmt(row.ask_depth_5, 1)}`;
-          return `<tr><td>${escapeHtml(row.label || "-")}</td><td>${pct(row.best_bid)}</td><td>${pct(row.best_ask)}</td><td>${pct(row.midpoint)}</td><td>${pct(row.spread)}</td><td>${escapeHtml(depth)}</td></tr>`;
-        }).join("") || `<tr><td colspan="6">暂无可用订单簿</td></tr>`;
+          const candidateMark = row.paper_candidate ? " ★" : "";
+          return `<tr><td>${escapeHtml((row.label || "-") + candidateMark)}</td><td>${pct(row.model_probability)}</td><td>${pct(row.best_bid)}</td><td>${pct(row.best_ask)}</td><td>${pct(row.paper_executable_price)}</td><td>${pct(row.paper_edge_after_cost)}</td><td>${pct(row.spread)}</td><td>${escapeHtml(depth)}</td></tr>`;
+        }).join("") || `<tr><td colspan="8">暂无可用订单簿</td></tr>`;
+        renderPaperTrades(payload.paper_trades || []);
         renderLiveList("liveEvents", payload.approved_events, "暂无通过硬规则的外部事件");
         renderLiveList("liveNews", payload.news, "暂无新闻或新闻源不可用");
+      }
+
+      function renderPaperTrades(rows) {
+        $("livePaperTradesBody").innerHTML = (Array.isArray(rows) ? rows : []).map((row) => {
+          const result = row.net_pnl == null ? "-" : fmt(row.net_pnl, 4);
+          return `<tr><td>${escapeHtml(row.created_at_utc || "-")}</td><td>${escapeHtml(row.outcome_label || "-")}</td><td>${escapeHtml(row.status || "-")}</td><td>${pct(row.edge_after_cost)}</td><td>${escapeHtml(result)}</td></tr>`;
+        }).join("") || `<tr><td colspan="5">暂无纸面记录</td></tr>`;
       }
 
       async function pullLive() {
         if (state.liveBusy) return;
         state.liveBusy = true;
         try {
-          const response = await fetch($("liveUrl").value.trim(), { cache: "no-store" });
+          const liveEndpoint = new URL($("liveUrl").value.trim(), window.location.href);
+          const tradesEndpoint = new URL("/api/paper-trades?limit=12", liveEndpoint.origin);
+          const [response, tradesResponse] = await Promise.all([
+            fetch(liveEndpoint, { cache: "no-store" }),
+            fetch(tradesEndpoint, { cache: "no-store" }),
+          ]);
           const payload = await response.json();
+          payload.paper_trades = tradesResponse.ok ? await tradesResponse.json() : [];
           if (!response.ok || payload.ok === false) throw new Error(payload.message || "实时服务返回错误");
           state.livePayload = payload;
           renderLive(payload);
@@ -796,13 +848,85 @@
         const valid = bool(row.price_distribution_valid) && mass != null && mass >= 0.6 && mass <= 1.2;
         const training = number(row.training_windows);
         if (forecast == null || marketExpected == null || marketExpected <= 0) {
-          return { relative: "盘口不可用", direction: "观望", edge: null, valid, decision: "不交易" };
+          return { relative: "该历史时点没有本地盘口快照", direction: "观望", edge: null, valid, hasMarketData: false, decision: "不交易（缺少历史盘口）" };
         }
         const difference = forecast - marketExpected;
         const edge = Math.abs(difference) / Math.max(1, Math.abs(marketExpected));
         const direction = difference > 5 ? "偏高" : difference < -5 ? "偏低" : "观望";
         const decision = !valid || !training ? "不交易" : edge >= 0.08 ? `纸面${direction}` : "优势不足";
-        return { relative: `${difference >= 0 ? "+" : ""}${fmt(difference)} 个`, direction, edge, valid, decision };
+        return { relative: `${difference >= 0 ? "+" : ""}${fmt(difference)} 个`, direction, edge, valid, hasMarketData: true, decision };
+      }
+
+      function renderBinProbabilities(row) {
+        let probabilities = {};
+        try {
+          probabilities = JSON.parse(row.bin_probabilities_json || "{}");
+        } catch (error) {
+          probabilities = {};
+        }
+        const entries = Object.entries(probabilities);
+        $("binProbabilityBody").innerHTML = entries.map(([label, probability]) =>
+          `<tr><td>${escapeHtml(label)}</td><td>${pct(probability)}</td></tr>`
+        ).join("") || `<tr><td colspan="2">当前 CSV 没有完整区间概率字段，请重新生成 fullprob 报告</td></tr>`;
+      }
+
+      function drawHistoryChart(rows) {
+        const canvas = $("historyChart");
+        if (!canvas) return;
+        const width = Math.max(320, canvas.clientWidth || 760);
+        const height = 280;
+        const ratio = window.devicePixelRatio || 1;
+        canvas.width = width * ratio;
+        canvas.height = height * ratio;
+        const ctx = canvas.getContext("2d");
+        ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+        ctx.clearRect(0, 0, width, height);
+        const margin = { left: 48, right: 18, top: 18, bottom: 34 };
+        const plotWidth = width - margin.left - margin.right;
+        const plotHeight = height - margin.top - margin.bottom;
+        const prediction = rows.map((item) => number(item.model_forecast_final_count));
+        const observed = rows.map((item) => number(item.current_count));
+        const revealedRow = state.revealed && state.privateRows.length ? privateRowFor(rows[0]) : null;
+        const revealedFinal = revealedRow ? number(revealedRow.observed_local_final_count) : null;
+        const values = [...prediction, ...observed, revealedFinal].filter((value) => value != null);
+        if (!values.length) return;
+        const maxValue = Math.max(1, ...values) * 1.08;
+        const x = (index) => margin.left + (rows.length <= 1 ? 0 : index / (rows.length - 1)) * plotWidth;
+        const y = (value) => margin.top + plotHeight - (value / maxValue) * plotHeight;
+        ctx.font = "11px sans-serif";
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = "#d7e0e7";
+        ctx.fillStyle = "#60717c";
+        for (let tick = 0; tick <= 4; tick += 1) {
+          const value = maxValue * tick / 4;
+          const lineY = y(value);
+          ctx.beginPath();
+          ctx.moveTo(margin.left, lineY);
+          ctx.lineTo(width - margin.right, lineY);
+          ctx.stroke();
+          ctx.fillText(Math.round(value), 8, lineY + 4);
+        }
+        const drawSeries = (valuesToDraw, color, dash = []) => {
+          ctx.beginPath();
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 2;
+          ctx.setLineDash(dash);
+          let started = false;
+          valuesToDraw.forEach((value, index) => {
+            if (value == null) { started = false; return; }
+            if (!started) { ctx.moveTo(x(index), y(value)); started = true; }
+            else ctx.lineTo(x(index), y(value));
+          });
+          ctx.stroke();
+          ctx.setLineDash([]);
+        };
+        drawSeries(prediction, "#1e6fa8");
+        drawSeries(observed, "#2f8f67");
+        if (revealedFinal != null) drawSeries(rows.map(() => revealedFinal), "#b34b4b", [6, 4]);
+        $("revealedLegend").classList.toggle("hidden", revealedFinal == null);
+        $("chartNote").textContent = revealedFinal == null
+          ? "蓝线是当时预测的最终数量，绿线是当时已经观察到的累计发推数。"
+          : `蓝线是预测最终数量，绿线是累计发推数，红色虚线是揭晓后的本地最终观测 ${revealedFinal}。`;
       }
 
       function update() {
@@ -814,28 +938,34 @@
         text("marketMeta", `${row.slug} · ${rows.length} 个小时`);
         text("currentCount", row.current_count);
         text("elapsedHours", fmt(row.elapsed_hours, 0));
-        text("forecastCount", fmt(row.model_forecast_final_count));
+        const forecastNumber = number(row.model_forecast_final_count);
+        text("forecastCount", forecastNumber == null ? "-" : `${fmt(forecastNumber, 2)}（约${Math.round(forecastNumber)}）`);
         text("forecastBin", row.forecast_bin);
         text("timelineStart", rows[0]?.checkpoint_utc || "-");
         text("timelineCursor", row.checkpoint_utc);
         text("timelineEnd", rows[rows.length - 1]?.checkpoint_utc || "-");
 
         const signal = signalFor(row);
+        const mass = number(row.price_probability_mass);
         text("relativeSignal", signal.relative);
         text("paperDirection", signal.direction);
         text("edgeProxy", signal.edge == null ? "-" : pct(signal.edge));
-        text("priceMass", row.price_probability_mass ? `${fmt(row.price_probability_mass, 3)} ${signal.valid ? "有效" : "异常"}` : "-");
+        text("priceMass", mass == null ? "-" : `${fmt(mass, 3)} ${signal.valid ? "有效" : signal.hasMarketData ? "异常" : "未采集"}`);
         text("trainingWindows", row.training_windows);
         text("riskDecision", signal.decision);
         $("qualityBadge").className = `badge ${signal.valid ? "good" : "bad"}`;
-        text("qualityBadge", signal.valid ? "盘口质量可用" : "盘口质量异常");
+        text("qualityBadge", signal.valid ? "盘口质量可用" : signal.hasMarketData ? "盘口质量异常" : "历史盘口未采集");
 
-        const marketLabel = signal.direction === "偏高" ? "模型认为结算总数偏高"
+        const marketLabel = !signal.hasMarketData ? "本历史时点没有可用盘口"
+          : signal.direction === "偏高" ? "模型认为结算总数偏高"
           : signal.direction === "偏低" ? "模型认为结算总数偏低" : "模型与盘口接近";
         text("guessMain", marketLabel);
+        renderBinProbabilities(row);
         const binProbability = number(row.forecast_bin_probability);
         const probabilityText = binProbability == null ? "区间概率待模型提供" : `预测区间概率 ${pct(binProbability)}`;
-        text("guessDetail", `模型 ${fmt(row.model_forecast_final_count)} · 盘口隐含 ${fmt(row.market_expected_count)} · 当前累计 ${row.current_count || 0} · ${probabilityText}`);
+        const marketText = signal.hasMarketData ? `盘口隐含 ${fmt(row.market_expected_count)}` : "历史盘口未采集";
+        text("guessDetail", `模型 ${fmt(row.model_forecast_final_count)} · ${marketText} · 当前累计 ${row.current_count || 0} · ${probabilityText}`);
+        drawHistoryChart(rows);
 
         const canShow = state.revealed;
         $("answerLock").classList.toggle("hidden", canShow);

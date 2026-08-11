@@ -250,6 +250,7 @@ python .\live_dashboard_server.py `
   --db data\extended.sqlite `
   --model data\extended_model_v4.json `
   --proxy http://127.0.0.1:7897 `
+  --refresh-seconds 30 `
   --port 8765
 ```
 
@@ -262,8 +263,19 @@ XTracker data, insufficient training windows, invalid probability mass, or
 small edge force `不交易`.
 
 The service also refreshes in the background and writes each paper snapshot to
-the `paper_forecasts` SQLite table. Recent snapshots are available at
-`http://127.0.0.1:8765/api/paper-history?limit=100`.
+the `paper_forecasts` SQLite table. It compares interval-level model
+probabilities with executable Yes best asks, including explicit local fee and
+slippage assumptions. A candidate is stored in `paper_trades` only as a paper
+record; the service never calls a trading endpoint. Recent snapshots and paper
+records are available at
+`http://127.0.0.1:8765/api/paper-history?limit=100` and
+`http://127.0.0.1:8765/api/paper-trades?limit=100`.
+
+Default paper risk parameters are conservative and configurable: `--min-edge
+0.08`, `--max-spread 0.04`, `--max-book-age 30`, `--paper-size 1`,
+`--min-depth-multiple 3`, `--paper-fee-rate 0.02`, and
+`--paper-slippage-bps 50`. These are research assumptions, not a claim about
+current official fees. Missing or stale data produces `不交易`.
 
 ## Hourly Local Replay
 

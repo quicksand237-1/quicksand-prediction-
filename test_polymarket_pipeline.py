@@ -17,8 +17,9 @@ from polymarket_pipeline import (
     price_distribution_is_valid,
     split_examples_purged,
     training_label_for_window,
+    write_hourly_test_reports,
 )
-from live_dashboard_server import parse_levels
+from live_dashboard_server import paper_buy_cost, parse_levels
 
 
 class MarketWindowTests(unittest.TestCase):
@@ -98,6 +99,26 @@ class SplitTests(unittest.TestCase):
 
 
 class HourlyReplayTests(unittest.TestCase):
+    def test_public_report_preserves_full_bin_probabilities(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            row = {
+                "slug": "market",
+                "checkpoint_utc": "2026-08-01T00:00:00+00:00",
+                "forecast_bin": "20-39",
+                "bin_probabilities_json": '{"<20": 0.2, "20-39": 0.8}',
+            }
+            write_hourly_test_reports(
+                root / "private.csv",
+                root / "summary.csv",
+                [row],
+                [],
+                root / "public.csv",
+            )
+            public = (root / "public.csv").read_text(encoding="utf-8")
+            self.assertIn("bin_probabilities_json", public.splitlines()[0])
+            self.assertIn("20-39", public)
+
     def test_hourly_checkpoints_start_after_minimum_elapsed_time(self) -> None:
         start = dt.datetime(2026, 7, 28, 16, tzinfo=dt.timezone.utc)
         window = Window("market", start, start + dt.timedelta(hours=4))
@@ -258,6 +279,64 @@ class SourceEventTests(unittest.TestCase):
 
 
 class LiveDashboardTests(unittest.TestCase):
+    def test_paper_buy_cost_includes_slippage_and_fee_assumption(self) -> None:
+        executable, fee = paper_buy_cost(0.50, 0.02, 50)
+        self.assertAlmostEqual(executable, 0.505)
+        self.assertAlmostEqual(fee, 0.01)
+
+    def test_paper_trade_migration_and_settlement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = MarketStore(Path(directory) / "paper.sqlite")
+            try:
+                store.conn.execute(
+                    """
+                    insert into market_outcomes (
+                        event_slug, market_id, label, lower_count, upper_count,
+                        resolved_yes, raw_json
+                    ) values (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    ("market", "outcome", "20-39", 20, 39, 1, "{}"),
+                )
+                store.conn.commit()
+                trade_id = store.save_paper_trade(
+                    created_at_utc=dt.datetime(2026, 8, 1, tzinfo=dt.timezone.utc),
+                    event_slug="market",
+                    outcome_label="20-39",
+                    side="yes",
+                    model_probability=0.75,
+                    quoted_best_bid=0.60,
+                    quoted_best_ask=0.65,
+                    executable_price=0.66,
+                    spread=0.05,
+                    available_depth=3.0,
+                    requested_size=1.0,
+                    fill_fraction=0.5,
+                    fee_rate=0.02,
+                    slippage_bps=50,
+                    estimated_fee=0.0065,
+                    status="paper_filled",
+                    recommendation="纸面方向研究",
+                    edge_after_cost=0.0765,
+                    risk_reasons=[],
+                    snapshot={"do_not_auto_trade": True},
+                )
+                self.assertEqual(store.settle_paper_trades("market"), 1)
+                row = store.conn.execute(
+                    "select status, resolved_yes, gross_pnl, net_pnl from paper_trades where id = ?",
+                    (trade_id,),
+                ).fetchone()
+                self.assertEqual(row[0], "settled")
+                self.assertEqual(row[1], 1)
+                self.assertAlmostEqual(row[2], 0.17)
+                self.assertAlmostEqual(row[3], 0.1635)
+                self.assertTrue(
+                    store.conn.execute(
+                        "select do_not_auto_trade from paper_forecasts"
+                    ).fetchone() is None
+                )
+            finally:
+                store.close()
+
     def test_orderbook_levels_produce_midpoint_spread_and_depth(self) -> None:
         best_bid, best_ask, midpoint, bid_depth, ask_depth = parse_levels({
             "bids": [

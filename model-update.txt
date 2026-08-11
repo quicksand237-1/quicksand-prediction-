@@ -311,3 +311,69 @@
 - 纸面快照不是成交记录，不代表真实收益。
 - 低流动性区间可能没有 CLOB 订单簿；系统保留错误并强制不交易。
 - 新分支仍必须经过未来市场样本外测试，不能因为实时展示完成而宣称盈利。
+
+版本 M-20260811-PAPER-TRADES
+改动内容：
+- 在 `MarketStore` 中增加幂等 `paper_trades` 表，记录区间、模型概率、best bid/ask、可执行价格、价差、盘口深度、纸面仓位、手续费和滑点假设、填充比例、风险原因及结算结果。
+- 保留 `paper_forecasts` 作为每轮全量快照；`paper_trades` 只表示候选区间的纸面成交审计，不调用交易 API。
+- 增加本地已结算区间的纸面结算方法，计算 gross/net PnL 和 settled 状态。
+
+数据范围：
+- 本次只修改代码和文档；未修改、删除或重写 `data\extended.sqlite`、V4 模型和 CSV。
+- 当前数据库核查：52 个市场、1,440 个区间、3,268 个订单簿快照、139 个纸面预测、0 个结构化批准事件。
+
+指标变化：
+- 本轮尚未训练新模型，也未声称 MAE、Brier、LogLoss 或收益改善；V4 继续作为正式基线。
+- 新增的是可执行性和成本后审计能力，不能把纸面 PnL 当作真实收益证明。
+
+失败原因和风险：
+- 当前历史逐区间 bid/ask、手续费、滑点和成交延迟仍不完整；默认成本参数只是保守假设，必须在未来市场持续采集后校准。
+- CLOB、XTracker、RSS 或 TSLA 失败、过期、低流动性、概率质量异常时，建议保持 `不交易`。
+- 自动下注、自动交易、钱包签名和真实资金操作永久关闭。
+
+版本 M-20260811-PAPER-TRADES-VERIFY
+验证结果：
+- `python -m unittest -v .\test_polymarket_pipeline.py`：15/15 通过。
+- `python -m py_compile .\polymarket_pipeline.py .\live_dashboard_server.py .\musk_tracker.py .\test_polymarket_pipeline.py`：通过。
+- 本地 HTTP 烟测：`/api/health`、`/api/paper-trades`、`/api/live` 全部返回 200。
+- 实时响应确认包含 `count`、`prediction`、`market`、`stock`、`news`、`approved_events`、`recommendation`、`paper_forecast_id` 和 `paper_trade_id`。
+
+结果解读：
+- 当前 `paper_trades` 只表示纸面候选与结算审计，不是实际成交。
+- 当前纸面候选已改为按区间模型概率与可执行 Yes 卖一比较，并把手续费/滑点假设写入快照。
+- `/api/live` 仍可能因为外部源失败而带有 `risk_reasons`，但应继续输出 `do_not_auto_trade=true`。
+
+未完成事项：
+- 还需要继续采集更多未来市场和更完整的成交数据，用于真正的样本外比较。
+- 新闻与事件目前仍以保守来源审核为主，AI 结构化是可选项，不是下注依据。
+
+版本 M-20260811-FULL-PROBABILITY-REPORT
+改动内容：
+- 修复小时回放报告只导出最高预测区间概率的问题。
+- 新增 `bin_probabilities_json`，保存每个结算区间的完整模型概率分布；该字段不包含真实结算答案，可安全放入公开预测 CSV。
+- 前端历史模式新增完整区间概率表，并把没有历史盘口快照的状态明确显示为“历史盘口未采集”。
+- `run_hourly_replay.ps1` 默认生成 `hourly_extended_v4_fullprob*.csv`，默认拒绝覆盖已有输出。
+
+数据范围和验证：
+- 使用现有 `data\extended.sqlite`，生成 8,014 条小时预测，48 个市场完成评分，未修改旧的 `hourly_extended_v4*.csv`。
+- 新公开报告首行包含 30 个区间概率，概率和为 1.000001，误差来自六位小数四舍五入。
+- 单元测试 16/16 通过，Python 编译检查通过。
+
+指标变化和风险：
+- 本轮没有训练新模型，MAE、Brier、LogLoss 不宣称改善；V4 仍是基线。
+- 历史报告盘口质量仍为无效，因为旧历史时点没有逐区间价格快照；这不等于实时 CLOB 一定不可用。
+- 完整区间概率仅代表模型分布，不能当作市场赔率、成交概率或盈利证明。
+
+版本 M-20260811-LIVE-VERSION-CHART
+改动内容：
+- 增加实时服务版本标识和健康接口版本输出，解决旧服务进程继续返回旧 outcome 字段而导致前端模型概率为空的问题。
+- 实时预测数增加四舍五入整数显示，但保留连续期望值用于概率分布计算。
+- 历史复盘页面增加模型最终数量、当时已观察累计数量和揭晓后本地最终观测的折线图；答案线在揭晓前保持隐藏。
+
+数据和实时性口径：
+- 新服务 API 烟测返回 23 个区间，每个区间包含 `model_probability`；`do_not_auto_trade=true`。
+- 当前实时采集是 REST/RSS 轮询，默认刷新间隔约 30 秒，不应描述为毫秒级实时或 WebSocket 实时。
+
+指标和风险：
+- 本轮未训练新模型，未宣称精度或收益改善；V4 继续作为基线。
+- 预测小数是计数分布的期望值，实际结算数量仍是整数且以区间概率表达不确定性。
