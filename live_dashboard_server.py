@@ -14,6 +14,8 @@ import concurrent.futures
 import datetime as dt
 import json
 import math
+import shutil
+import sqlite3
 import threading
 import urllib.error
 import urllib.parse
@@ -23,6 +25,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
+
+from ai_provider import AIConfigurationError, AIProvider, AIProviderError
+from news_event_crawler import NewsCorpusStore, USER_AGENT, crawl_sources, load_sources
 
 from musk_tracker import (
     DEFAULT_PLATFORM,
@@ -36,7 +41,10 @@ from polymarket_pipeline import (
     GammaClient,
     MarketStore,
     Window,
+    crawl_one,
     count_distribution,
+    generate_slugs,
+    hourly_test_command,
     market_features,
     outcome_label_for_count,
     parse_timestamp,
@@ -51,7 +59,331 @@ DEFAULT_NEWS_FEED = (
     "https://news.google.com/rss/search?"
     "q=Elon+Musk+Tesla+SpaceX+xAI&hl=en-US&gl=US&ceid=US:en"
 )
-LIVE_SERVICE_VERSION = "2026-08-11-paper-trades-v2"
+LIVE_SERVICE_VERSION = "2026-08-12-ai-assist-v1"
+PRIVATE_REPORT_COLUMNS = {
+    "observed_local_final_count",
+    "resolved_bin",
+    "absolute_error_to_observed_count",
+    "resolved_bin_probability",
+    "brier_score",
+    "log_loss",
+}
+
+
+class HistorySyncManager:
+    """Run an explicit, sequential historical backfill without blocking HTTP."""
+
+    def __init__(
+        self,
+        service_args: argparse.Namespace,
+        database_lock: Any,
+        report_paths: dict[str, Path],
+        crawl_fn: Any = crawl_one,
+        slug_generator: Any = generate_slugs,
+    ) -> None:
+        self.service_args = service_args
+        self.database_lock = database_lock
+        self.report_paths = report_paths
+        self.crawl_fn = crawl_fn
+        self.slug_generator = slug_generator
+        self.lock = threading.Lock()
+        self.thread: threading.Thread | None = None
+        self._state: dict[str, Any] = {
+            "state": "idle",
+            "message": "尚未启动历史市场抓取",
+            "started_at_utc": None,
+            "finished_at_utc": None,
+            "start": None,
+            "end": None,
+            "include_prices": False,
+            "price_interval": None,
+            "total": 0,
+            "completed": 0,
+            "current_slug": None,
+            "succeeded": 0,
+            "failed": 0,
+            "results": [],
+            "rebuild_reports": False,
+            "report_result": None,
+        }
+
+    def status(self) -> dict[str, Any]:
+        with self.lock:
+            return json.loads(json.dumps(self._state, ensure_ascii=False))
+
+    def _crawl_args(self, include_prices: bool, price_interval: str) -> argparse.Namespace:
+        return argparse.Namespace(
+            db=self.service_args.db,
+            user=self.service_args.user,
+            platform=self.service_args.platform,
+            timezone=self.service_args.timezone,
+            gamma_url=self.service_args.gamma_url,
+            clob_url=self.service_args.clob_url,
+            tracker_url=self.service_args.tracker_url,
+            proxy=self.service_args.proxy,
+            timeout=self.service_args.timeout,
+            skip_prices=not include_prices,
+            price_interval=price_interval,
+            price_fidelity=60,
+            orderbooks=False,
+            request_delay=0.1,
+            price_workers=max(1, min(8, self.service_args.book_workers)),
+        )
+
+    def _report_args(self) -> argparse.Namespace:
+        return argparse.Namespace(
+            db=self.service_args.db,
+            slug=None,
+            start=None,
+            end=None,
+            model=self.service_args.model,
+            user=self.service_args.user,
+            platform=self.service_args.platform,
+            timezone=self.service_args.timezone,
+            min_elapsed_hours=1,
+            training_step_hours=12,
+            training_min_elapsed_hours=12,
+            min_final_count=1,
+            max_price_age_hours=24,
+            ridge=10.0,
+            require_verified_final_count=True,
+            use_resolved_bin_labels=True,
+            report=str(self.report_paths["private"]),
+            summary=str(self.report_paths["summary"]),
+            public_report=str(self.report_paths["public"]),
+        )
+
+    def _backup_reports(self) -> list[str]:
+        existing = [path for path in self.report_paths.values() if path.is_file()]
+        if not existing:
+            return []
+        stamp = utc_now().strftime("%Y%m%dT%H%M%SZ")
+        backup_dir = Path(self.service_args.db).resolve().parent / "report_backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backups = []
+        for path in existing:
+            backup = backup_dir / f"{path.name}.{stamp}.bak"
+            shutil.copy2(path, backup)
+            backups.append(str(backup))
+        return backups
+
+    def start(self, payload: dict[str, Any]) -> dict[str, Any]:
+        start = str(payload.get("start") or "").strip()
+        end = str(payload.get("end") or "").strip()
+        try:
+            start_date = dt.date.fromisoformat(start)
+            end_date = dt.date.fromisoformat(end)
+        except ValueError as exc:
+            raise ValueError("历史抓取日期必须为 YYYY-MM-DD") from exc
+        if end_date <= start_date:
+            raise ValueError("结束日期必须晚于开始日期；结束日期为排他边界")
+        today = utc_now().astimezone(ZoneInfo(self.service_args.timezone)).date()
+        if end_date > today:
+            raise ValueError("历史抓取结束日期不能晚于当前本地日期")
+        raw_include_prices = payload.get("include_prices", False)
+        include_prices = raw_include_prices is True or str(raw_include_prices).lower() in {
+            "1", "true", "yes", "on",
+        }
+        price_interval = str(payload.get("price_interval") or "1d")
+        if price_interval not in {"1d", "1w", "1m", "max"}:
+            raise ValueError("历史赔率间隔仅支持 1d、1w、1m 或 max")
+        raw_rebuild_reports = payload.get("rebuild_reports", True)
+        rebuild_reports = raw_rebuild_reports is True or str(raw_rebuild_reports).lower() in {
+            "1", "true", "yes", "on",
+        }
+        slugs = list(dict.fromkeys(self.slug_generator(start, end, self.service_args.timezone)))
+        if not slugs:
+            raise ValueError("日期范围内没有可抓取的周二或周五市场")
+        with self.lock:
+            if self.thread and self.thread.is_alive():
+                raise ValueError("已有历史抓取任务正在运行，请等待其完成")
+            self._state = {
+                "state": "running",
+                "message": "历史抓取已开始；实时刷新将等待本任务释放数据库锁",
+                "started_at_utc": utc_now().isoformat(),
+                "finished_at_utc": None,
+                "start": start,
+                "end": end,
+                "include_prices": include_prices,
+                "price_interval": price_interval if include_prices else None,
+                "total": len(slugs),
+                "completed": 0,
+                "current_slug": None,
+                "succeeded": 0,
+                "failed": 0,
+                "results": [],
+                "rebuild_reports": rebuild_reports,
+                "report_result": None,
+            }
+            crawl_args = self._crawl_args(include_prices, price_interval)
+            self.thread = threading.Thread(
+                target=self._run,
+                args=(crawl_args, slugs, rebuild_reports),
+                name="historical-market-sync",
+                daemon=True,
+            )
+            self.thread.start()
+        return self.status()
+
+    def _run(self, crawl_args: argparse.Namespace, slugs: list[str], rebuild_reports: bool) -> None:
+        try:
+            for slug in slugs:
+                with self.lock:
+                    self._state["current_slug"] = slug
+                try:
+                    # crawl_one creates a separate SQLite connection, so all live writes
+                    # must wait until this market has finished its transaction sequence.
+                    with self.database_lock:
+                        result = self.crawl_fn(crawl_args, slug)
+                    summary = {
+                        "slug": slug,
+                        "ok": True,
+                        "new_posts_inserted": result.get("new_posts_inserted", 0),
+                        "new_price_rows": result.get("new_price_rows", 0),
+                        "source_errors": len(result.get("source_errors", [])),
+                        "price_errors": result.get("price_errors", 0),
+                    }
+                    succeeded = True
+                except Exception as exc:
+                    summary = {
+                        "slug": slug,
+                        "ok": False,
+                        "error": type(exc).__name__,
+                        "message": str(exc)[:300],
+                    }
+                    succeeded = False
+                with self.lock:
+                    self._state["results"].append(summary)
+                    self._state["completed"] += 1
+                    self._state["succeeded"] += int(succeeded)
+                    self._state["failed"] += int(not succeeded)
+            if rebuild_reports:
+                with self.lock:
+                    self._state["message"] = "市场抓取完成，正在生成固定公开/私有/汇总复盘文件"
+                with self.database_lock:
+                    backups = self._backup_reports()
+                    hourly_test_command(self._report_args())
+                with self.lock:
+                    self._state["report_result"] = {
+                        "ok": True,
+                        "backups": backups,
+                        "public": str(self.report_paths["public"]),
+                        "private": str(self.report_paths["private"]),
+                        "summary": str(self.report_paths["summary"]),
+                    }
+            with self.lock:
+                self._state["state"] = "succeeded"
+                self._state["current_slug"] = None
+                self._state["finished_at_utc"] = utc_now().isoformat()
+                self._state["message"] = (
+                    "历史抓取和固定复盘文件生成完成；未自动重训模型"
+                    if rebuild_reports else "历史抓取完成；未自动重训模型或生成复盘 CSV"
+                )
+        except Exception as exc:
+            with self.lock:
+                self._state["state"] = "failed"
+                self._state["current_slug"] = None
+                self._state["finished_at_utc"] = utc_now().isoformat()
+                self._state["message"] = f"历史抓取任务失败：{type(exc).__name__}"
+
+
+class NewsSyncManager:
+    """Fetch the fixed local whitelist before optional AI analysis."""
+
+    def __init__(self, service_args: argparse.Namespace, database_lock: Any) -> None:
+        self.service_args = service_args
+        self.database_lock = database_lock
+        self.lock = threading.Lock()
+        self.thread: threading.Thread | None = None
+        self._state: dict[str, Any] = {
+            "state": "idle",
+            "message": "尚未抓取合规新闻语料",
+            "started_at_utc": None,
+            "finished_at_utc": None,
+            "documents_seen": 0,
+            "errors": 0,
+            "eligible_documents": 0,
+            "run_id": None,
+            "error_summaries": [],
+        }
+
+    def status(self) -> dict[str, Any]:
+        with self.lock:
+            return json.loads(json.dumps(self._state, ensure_ascii=False))
+
+    def start(self, payload: dict[str, Any]) -> dict[str, Any]:
+        contact = str(payload.get("contact") or "").strip()
+        if len(contact) > 160 or any(char in contact for char in "\r\n"):
+            raise ValueError("公开联系邮箱格式无效")
+        user_agent = USER_AGENT
+        if contact:
+            user_agent = f"AIPRP-local-news-corpus/1.0 (research; contact {contact})"
+        with self.lock:
+            if self.thread and self.thread.is_alive():
+                raise ValueError("已有新闻抓取任务正在运行，请等待其完成")
+            self._state = {
+                "state": "running",
+                "message": "正在抓取固定白名单来源；联系邮箱不会保存到本地",
+                "started_at_utc": utc_now().isoformat(),
+                "finished_at_utc": None,
+                "documents_seen": 0,
+                "errors": 0,
+                "eligible_documents": 0,
+                "run_id": None,
+                "error_summaries": [],
+            }
+            self.thread = threading.Thread(
+                target=self._run,
+                args=(user_agent,),
+                name="approved-news-sync",
+                daemon=True,
+            )
+            self.thread.start()
+        return self.status()
+
+    def _run(self, user_agent: str) -> None:
+        try:
+            with self.database_lock:
+                store = NewsCorpusStore(Path(self.service_args.db))
+                try:
+                    result = crawl_sources(
+                        store,
+                        load_sources(Path(self.service_args.news_sources)),
+                        proxy=self.service_args.proxy,
+                        timeout=self.service_args.timeout,
+                        user_agent=user_agent,
+                    )
+                    eligible = store.conn.execute(
+                        "select count(*) from source_documents where corpus_eligible=1 and status='accepted'"
+                    ).fetchone()[0]
+                    errors = store.conn.execute(
+                        """select source_id, error_type, message from crawl_errors
+                           where run_id=? order by occurred_at_utc desc limit 3""",
+                        (result["run_id"],),
+                    ).fetchall()
+                finally:
+                    store.close()
+            with self.lock:
+                self._state.update({
+                    "state": "succeeded",
+                    "message": "新闻抓取完成；只有合规来源文档可供 AI 手动分析",
+                    "finished_at_utc": utc_now().isoformat(),
+                    "documents_seen": result["documents_seen"],
+                    "errors": result["errors"],
+                    "eligible_documents": eligible,
+                    "run_id": result["run_id"],
+                    "error_summaries": [
+                        f"{row[0]}: {row[1]}: {str(row[2])[:180]}" for row in errors
+                    ],
+                })
+        except Exception as exc:
+            with self.lock:
+                self._state.update({
+                    "state": "failed",
+                    "message": f"新闻抓取失败：{type(exc).__name__}",
+                    "finished_at_utc": utc_now().isoformat(),
+                    "error_summaries": [str(exc)[:180]],
+                })
 
 
 def parse_float(value: Any) -> float | None:
@@ -105,6 +437,13 @@ def paper_buy_cost(
     return executable, fee
 
 
+def public_report_is_safe(payload: bytes) -> bool:
+    """Do not accidentally publish answer-bearing CSV through the public route."""
+    header = payload.splitlines()[0].decode("utf-8-sig", errors="replace") if payload else ""
+    fields = {item.strip() for item in header.split(",")}
+    return not bool(fields & PRIVATE_REPORT_COLUMNS)
+
+
 class WebFetcher:
     def __init__(self, proxy: str | None, timeout: int) -> None:
         handler = urllib.request.ProxyHandler(
@@ -126,7 +465,11 @@ class WebFetcher:
 
 
 class LiveService:
-    def __init__(self, args: argparse.Namespace) -> None:
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        database_lock: Any = None,
+    ) -> None:
         self.args = args
         self.store = MarketStore(Path(args.db))
         self.gamma = GammaClient(args.gamma_url, args.timeout, args.proxy)
@@ -143,7 +486,12 @@ class LiveService:
         self.last_news_at: dt.datetime | None = None
         self.last_stock: dict[str, Any] = {}
         self.last_stock_at: dt.datetime | None = None
-        self.lock = threading.Lock()
+        # One lock is shared with an explicit historical sync task so separate
+        # SQLite connections never write during the same refresh transaction.
+        self.lock = database_lock or threading.RLock()
+        self.ai_provider = AIProvider(Path(__file__).parent, args.proxy, args.timeout + 25)
+        self.ai_lock = threading.Lock()
+        self.ai_last_call: dt.datetime | None = None
         self.stop_event = threading.Event()
         self.background_thread: threading.Thread | None = None
 
@@ -297,6 +645,60 @@ class LiveService:
             }
             for row in rows
         ]
+
+    def ai_status(self) -> dict[str, Any]:
+        return self.ai_provider.status()
+
+    def _ai_documents(self, now: dt.datetime) -> list[dict[str, Any]]:
+        try:
+            rows = self.store.conn.execute(
+                """
+                select document_id, source_id, source_tier, source_reliability,
+                       url, title, published_at_utc, available_at_utc, excerpt
+                from source_documents
+                where corpus_eligible = 1 and status = 'accepted'
+                  and published_at_utc <= ? and available_at_utc <= ?
+                order by published_at_utc desc
+                limit 12
+                """,
+                (now.isoformat(), now.isoformat()),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        return [dict(row) for row in rows]
+
+    def ai_analyze(self) -> dict[str, Any]:
+        now = utc_now()
+        with self.ai_lock:
+            if self.ai_last_call and (now - self.ai_last_call).total_seconds() < 30:
+                return {
+                    "ok": False,
+                    "message": "AI 分析冷却中，请 30 秒后再试",
+                    "do_not_auto_trade": True,
+                }
+            snapshot = self.refresh()
+            documents = self._ai_documents(now)
+            if not documents:
+                return {
+                    "ok": False,
+                    "message": "当前没有通过来源审核且不晚于当前时点的本地语料；请先运行 crawl-news 并配置合规来源",
+                    "documents_used": 0,
+                    "probability_changed": False,
+                    "recommendation_changed": False,
+                    "do_not_auto_trade": True,
+                }
+            self.ai_last_call = now
+            context = {
+                "slug": snapshot.get("slug"),
+                "current_count": (snapshot.get("count") or {}).get("current"),
+                "local_model_prediction": (snapshot.get("prediction") or {}).get("final_count"),
+                "forecast_bin": (snapshot.get("prediction") or {}).get("forecast_bin"),
+                "market_expected_count": (snapshot.get("market") or {}).get("expected_count"),
+                "approved_events": snapshot.get("approved_events", []),
+            }
+            result = self.ai_provider.analyze(documents, context)
+            result["ok"] = True
+            return result
 
     def _prior_rate(self, window: Window) -> float:
         prior_windows = [
@@ -786,10 +1188,109 @@ class LiveService:
                 for row in rows
             ]
 
+    def live_markets(self, force: bool = False) -> list[dict[str, Any]]:
+        snapshot = dict(self.refresh(force=force))
+        snapshot["paper_trades"] = self.paper_trades(12)
+        return [snapshot]
+
+
+class MultiLiveService:
+    """Keep each selected market isolated while sharing process configuration."""
+
+    def __init__(self, args: argparse.Namespace, slugs: list[str]) -> None:
+        self.database_lock = threading.RLock()
+        self.services: list[LiveService] = []
+        for slug in slugs:
+            child_args = argparse.Namespace(**vars(args))
+            child_args.slug = slug
+            self.services.append(LiveService(child_args, self.database_lock))
+        self.refresh_seconds = max(10, args.refresh_seconds)
+        self.stop_event = threading.Event()
+        self.background_thread: threading.Thread | None = None
+
+    def start_background(self) -> None:
+        if self.background_thread and self.background_thread.is_alive():
+            return
+        self.background_thread = threading.Thread(
+            target=self._background_loop,
+            name="multi-live-dashboard-refresh",
+            daemon=True,
+        )
+        self.background_thread.start()
+
+    def _background_loop(self) -> None:
+        while not self.stop_event.is_set():
+            for service in self.services:
+                if self.stop_event.is_set():
+                    break
+                try:
+                    # SQLite writes stay sequential across selected markets.
+                    service.refresh(force=True)
+                except Exception as exc:
+                    service.last_snapshot = {
+                        "generated_at_utc": utc_now().isoformat(),
+                        "slug": service.args.slug,
+                        "errors": [f"background: {type(exc).__name__}: {exc}"],
+                        "recommendation": {
+                            "label": "不交易",
+                            "paper_direction": "观望",
+                            "do_not_auto_trade": True,
+                            "risk_reasons": ["live_refresh_failed"],
+                        },
+                    }
+            self.stop_event.wait(self.refresh_seconds)
+
+    def close(self) -> None:
+        self.stop_event.set()
+        if self.background_thread and self.background_thread.is_alive():
+            self.background_thread.join(timeout=5)
+        for service in self.services:
+            service.close()
+
+    def refresh(self) -> dict[str, Any]:
+        return self.services[0].refresh()
+
+    def paper_history(self, limit: int = 100) -> list[dict[str, Any]]:
+        return self.services[0].paper_history(limit)
+
+    def paper_trades(self, limit: int = 100) -> list[dict[str, Any]]:
+        return self.services[0].paper_trades(limit)
+
+    def ai_status(self) -> dict[str, Any]:
+        return self.services[0].ai_status()
+
+    def ai_analyze(self) -> dict[str, Any]:
+        return self.services[0].ai_analyze()
+
+    def live_markets(self, force: bool = False) -> list[dict[str, Any]]:
+        snapshots: list[dict[str, Any]] = []
+        for service in self.services:
+            try:
+                snapshot = dict(service.refresh(force=True) if force else service.refresh())
+                snapshot["paper_trades"] = service.paper_trades(12)
+            except Exception as exc:
+                snapshot = {
+                    "generated_at_utc": utc_now().isoformat(),
+                    "slug": service.args.slug,
+                    "errors": [f"market_refresh: {type(exc).__name__}: {exc}"],
+                    "recommendation": {
+                        "label": "不交易",
+                        "paper_direction": "观望",
+                        "do_not_auto_trade": True,
+                        "risk_reasons": ["market_refresh_failed"],
+                    },
+                    "paper_trades": [],
+                }
+            snapshots.append(snapshot)
+        return snapshots
+
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    service: LiveService
+    service: LiveService | MultiLiveService
     static_file: Path
+    report_paths: dict[str, Path]
+    history_sync: HistorySyncManager
+    news_sync: NewsSyncManager
 
     def _send(self, status: int, body: bytes, content_type: str) -> None:
         self.send_response(status)
@@ -799,6 +1300,43 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def _local_origin_allowed(self) -> bool:
+        client_host = self.client_address[0]
+        if client_host not in {"127.0.0.1", "::1", "localhost"}:
+            return False
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        parsed = urllib.parse.urlsplit(origin)
+        return parsed.scheme in {"http", "https"} and parsed.hostname in {"127.0.0.1", "localhost", "::1"} and parsed.port in {None, self.server.server_port}
+
+    def _json_body(self) -> dict[str, Any]:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > 65536:
+            raise ValueError("请求体大小无效")
+        body = json.loads(self.rfile.read(length).decode("utf-8"))
+        if not isinstance(body, dict):
+            raise ValueError("请求体必须是 JSON 对象")
+        return body
+
+    def _json_response(self, status: int, payload: dict[str, Any]) -> None:
+        self._send(status, json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+
+    def _serve_report(self, name: str) -> None:
+        path = self.report_paths[name]
+        try:
+            payload = path.read_bytes()
+        except FileNotFoundError:
+            self._json_response(404, {"ok": False, "message": f"本地复盘文件不存在：{path.name}"})
+            return
+        except OSError:
+            self._json_response(500, {"ok": False, "message": "本地复盘文件无法读取"})
+            return
+        if name == "public" and not public_report_is_safe(payload):
+            self._json_response(409, {"ok": False, "message": "公开复盘路径包含结算答案字段，已拒绝加载"})
+            return
+        self._send(200, payload, "text/csv; charset=utf-8")
 
     def do_GET(self) -> None:
         path = urllib.parse.urlsplit(self.path).path
@@ -814,6 +1352,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "service": "live_dashboard_server",
                 "version": LIVE_SERVICE_VERSION,
                 "do_not_auto_trade": True,
+                "ai": self.service.ai_status(),
             }, ensure_ascii=False).encode("utf-8")
             self._send(200, body, "application/json; charset=utf-8")
             return
@@ -835,6 +1374,67 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     }, ensure_ascii=False).encode("utf-8"),
                     "application/json; charset=utf-8",
                 )
+            return
+        if path == "/api/ai/status":
+            self._json_response(200, {"ok": True, **self.service.ai_status(), "do_not_auto_trade": True})
+            return
+        if path == "/api/reports/public":
+            self._serve_report("public")
+            return
+        if path == "/api/reports/status":
+            self._json_response(200, {
+                "ok": True,
+                "public": {"name": self.report_paths["public"].name, "exists": self.report_paths["public"].is_file()},
+                "private": {"name": self.report_paths["private"].name, "exists": self.report_paths["private"].is_file()},
+                "summary": {"name": self.report_paths["summary"].name, "exists": self.report_paths["summary"].is_file()},
+            })
+            return
+        if path == "/api/history-sync/status":
+            self._json_response(200, {
+                "ok": True,
+                "history_sync": self.history_sync.status(),
+                "do_not_auto_trade": True,
+            })
+            return
+        if path == "/api/news-sync/status":
+            self._json_response(200, {
+                "ok": True,
+                "news_sync": self.news_sync.status(),
+                "do_not_auto_trade": True,
+            })
+            return
+        if path == "/api/live-markets":
+            try:
+                body = json.dumps(
+                    self.service.live_markets(),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                self._send(200, body, "application/json; charset=utf-8")
+            except Exception as exc:
+                self._send(
+                    503,
+                    json.dumps({
+                        "ok": False,
+                        "error": type(exc).__name__,
+                        "message": str(exc),
+                    }, ensure_ascii=False).encode("utf-8"),
+                    "application/json; charset=utf-8",
+                )
+            return
+        if path == "/api/refresh-now":
+            try:
+                body = json.dumps({
+                    "ok": True,
+                    "markets": self.service.live_markets(force=True),
+                    "do_not_auto_trade": True,
+                }, ensure_ascii=False).encode("utf-8")
+                self._send(200, body, "application/json; charset=utf-8")
+            except Exception as exc:
+                self._json_response(503, {
+                    "ok": False,
+                    "message": f"立即刷新失败：{type(exc).__name__}",
+                    "do_not_auto_trade": True,
+                })
             return
         if path == "/api/paper-history":
             try:
@@ -862,6 +1462,88 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         self._send(404, b"Not found", "text/plain; charset=utf-8")
 
+    def do_POST(self) -> None:
+        path = urllib.parse.urlsplit(self.path).path
+        if path == "/api/news-sync":
+            if not self._local_origin_allowed():
+                self._json_response(403, {"ok": False, "message": "仅允许本地网页启动新闻抓取"})
+                return
+            try:
+                self._json_response(202, {
+                    "ok": True,
+                    "news_sync": self.news_sync.start(self._json_body()),
+                    "do_not_auto_trade": True,
+                })
+            except (ValueError, json.JSONDecodeError) as exc:
+                self._json_response(400, {"ok": False, "message": str(exc), "do_not_auto_trade": True})
+            return
+        if path == "/api/history-sync":
+            if not self._local_origin_allowed():
+                self._json_response(403, {"ok": False, "message": "仅允许本地网页启动历史抓取"})
+                return
+            try:
+                payload = self._json_body()
+                self._json_response(202, {
+                    "ok": True,
+                    "history_sync": self.history_sync.start(payload),
+                    "do_not_auto_trade": True,
+                })
+            except (ValueError, json.JSONDecodeError) as exc:
+                self._json_response(400, {"ok": False, "message": str(exc), "do_not_auto_trade": True})
+            return
+        if path in {"/api/reports/private", "/api/reports/summary"}:
+            if not self._local_origin_allowed():
+                self._json_response(403, {"ok": False, "message": "只允许本机网站读取私有复盘文件"})
+                return
+            try:
+                self._json_body()
+                self._serve_report("private" if path.endswith("/private") else "summary")
+            except (ValueError, json.JSONDecodeError) as exc:
+                self._json_response(400, {"ok": False, "message": str(exc)})
+            return
+        if path == "/api/refresh-now" and not self._local_origin_allowed():
+            self._json_response(403, {"ok": False, "message": "只允许本机网站访问本地刷新接口"})
+            return
+        if path == "/api/refresh-now":
+            try:
+                self._json_body()
+                self._json_response(200, {
+                    "ok": True,
+                    "markets": self.service.live_markets(force=True),
+                    "do_not_auto_trade": True,
+                })
+            except Exception as exc:
+                self._json_response(503, {
+                    "ok": False,
+                    "message": f"立即刷新失败：{type(exc).__name__}",
+                    "do_not_auto_trade": True,
+                })
+            return
+        if path.startswith("/api/ai/") and not self._local_origin_allowed():
+            self._json_response(403, {"ok": False, "message": "只允许本机网站访问 AI 设置接口"})
+            return
+        try:
+            payload = self._json_body()
+            if path == "/api/ai/config":
+                result = self.service.ai_provider.configure(payload) if hasattr(self.service, "ai_provider") else self.service.services[0].ai_provider.configure(payload)
+                self._json_response(200, {"ok": True, **result, "do_not_auto_trade": True})
+                return
+            if path == "/api/ai/clear":
+                result = self.service.ai_provider.clear() if hasattr(self.service, "ai_provider") else self.service.services[0].ai_provider.clear()
+                self._json_response(200, {"ok": True, **result, "do_not_auto_trade": True})
+                return
+            if path == "/api/ai/analyze":
+                result = self.service.ai_analyze()
+                self._json_response(200 if result.get("ok") else 409, result)
+                return
+        except (AIConfigurationError, AIProviderError, ValueError, json.JSONDecodeError) as exc:
+            self._json_response(400, {"ok": False, "message": str(exc), "do_not_auto_trade": True})
+            return
+        except Exception:
+            self._json_response(500, {"ok": False, "message": "AI 本地服务处理失败", "do_not_auto_trade": True})
+            return
+        self._send(404, b"Not found", "text/plain; charset=utf-8")
+
     def log_message(self, format: str, *args: Any) -> None:
         return
 
@@ -869,8 +1551,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Serve the local live Musk forecast dashboard.")
     parser.add_argument("--slug", required=True)
+    parser.add_argument(
+        "--extra-slug",
+        action="append",
+        default=[],
+        help="Add another market to the isolated live-market selector; repeatable.",
+    )
     parser.add_argument("--db", default="data/extended.sqlite")
     parser.add_argument("--model", default="data/extended_model_v4.json")
+    parser.add_argument("--public-report", default="data/hourly_extended_v4_fullprob_public.csv")
+    parser.add_argument("--private-report", default="data/hourly_extended_v4_fullprob.csv")
+    parser.add_argument("--summary-report", default="data/hourly_extended_v4_fullprob_summary.csv")
     parser.add_argument("--proxy", default="http://127.0.0.1:7897")
     parser.add_argument("--bind", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
@@ -888,6 +1579,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--book-workers", type=int, default=8)
     parser.add_argument("--stock-symbol", default="TSLA")
     parser.add_argument("--news-feed", action="append")
+    parser.add_argument("--news-sources", default="news_sources.example.json")
     parser.add_argument("--user", default=DEFAULT_USER)
     parser.add_argument("--platform", default=DEFAULT_PLATFORM)
     parser.add_argument("--timezone", default=DEFAULT_TZ)
@@ -904,12 +1596,29 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    service = LiveService(args)
+    slugs = list(dict.fromkeys([args.slug, *args.extra_slug]))
+    service: LiveService | MultiLiveService = (
+        MultiLiveService(args, slugs) if len(slugs) > 1 else LiveService(args)
+    )
+    database_lock = service.database_lock if isinstance(service, MultiLiveService) else service.lock
+    report_paths = {
+        "public": Path(args.public_report).resolve(),
+        "private": Path(args.private_report).resolve(),
+        "summary": Path(args.summary_report).resolve(),
+    }
+    history_sync = HistorySyncManager(args, database_lock, report_paths)
+    news_sync = NewsSyncManager(args, database_lock)
     service.start_background()
     handler = type(
         "ConfiguredDashboardHandler",
         (DashboardHandler,),
-        {"service": service, "static_file": Path(args.static_file)},
+        {
+            "service": service,
+            "static_file": Path(args.static_file),
+            "report_paths": report_paths,
+            "history_sync": history_sync,
+            "news_sync": news_sync,
+        },
     )
     server = ThreadingHTTPServer((args.bind, args.port), handler)
     print(f"Live dashboard: http://{args.bind}:{args.port}/", flush=True)

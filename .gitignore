@@ -5,3 +5,6 @@ data/
 *.log
 __pycache__/
 *.pyc
+.env
+.env.*
+.ai-config.json

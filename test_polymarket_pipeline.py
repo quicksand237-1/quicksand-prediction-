@@ -1,6 +1,8 @@
+import argparse
 import datetime as dt
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -19,7 +21,99 @@ from polymarket_pipeline import (
     training_label_for_window,
     write_hourly_test_reports,
 )
-from live_dashboard_server import paper_buy_cost, parse_levels
+from live_dashboard_server import (
+    HistorySyncManager,
+    MultiLiveService,
+    NewsSyncManager,
+    build_parser,
+    paper_buy_cost,
+    parse_levels,
+    public_report_is_safe,
+)
+
+
+class HistorySyncTests(unittest.TestCase):
+    def test_explicit_history_sync_uses_sequential_crawl_arguments(self) -> None:
+        calls = []
+
+        def fake_crawl(args, slug):
+            calls.append((slug, args.skip_prices, args.price_interval, args.orderbooks))
+            return {"new_posts_inserted": 2, "new_price_rows": 0, "source_errors": []}
+
+        args = argparse.Namespace(
+            db="ignored.sqlite",
+            user="elonmusk",
+            platform="X",
+            timezone="America/New_York",
+            gamma_url="https://gamma.example.test",
+            clob_url="https://clob.example.test",
+            tracker_url="https://tracker.example.test",
+            proxy=None,
+            timeout=10,
+            book_workers=4,
+        )
+        manager = HistorySyncManager(
+            args,
+            threading.RLock(),
+            {
+                "public": Path("public.csv"),
+                "private": Path("private.csv"),
+                "summary": Path("summary.csv"),
+            },
+            crawl_fn=fake_crawl,
+            slug_generator=lambda start, end, timezone: ["market-one", "market-two"],
+        )
+        started = manager.start({
+            "start": "2026-01-01",
+            "end": "2026-01-10",
+            "include_prices": False,
+            "price_interval": "1d",
+            "rebuild_reports": False,
+        })
+        self.assertEqual(started["state"], "running")
+        assert manager.thread is not None
+        manager.thread.join(timeout=2)
+        status = manager.status()
+        self.assertEqual(status["state"], "succeeded")
+        self.assertEqual(status["succeeded"], 2)
+        self.assertEqual(calls, [("market-one", True, "1d", False), ("market-two", True, "1d", False)])
+
+    def test_history_sync_rejects_invalid_dates_before_starting_worker(self) -> None:
+        args = argparse.Namespace(
+            db="ignored.sqlite", user="elonmusk", platform="X", timezone="America/New_York",
+            gamma_url="https://gamma.example.test", clob_url="https://clob.example.test",
+            tracker_url="https://tracker.example.test", proxy=None, timeout=10, book_workers=4,
+        )
+        manager = HistorySyncManager(args, threading.RLock(), {
+            "public": Path("public.csv"),
+            "private": Path("private.csv"),
+            "summary": Path("summary.csv"),
+        })
+        with self.assertRaises(ValueError):
+            manager.start({"start": "2026-01-10", "end": "2026-01-10"})
+
+    def test_news_sync_rejects_multiline_contact_without_starting_request(self) -> None:
+        args = argparse.Namespace(db="ignored.sqlite", news_sources="missing.json")
+        manager = NewsSyncManager(args, threading.RLock())
+        with self.assertRaises(ValueError):
+            manager.start({"contact": "name@example.com\nInjected: value"})
+        self.assertEqual(manager.status()["state"], "idle")
+
+    def test_fixed_reports_are_backed_up_before_regeneration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            public = root / "public.csv"
+            public.write_text("old-public-report", encoding="utf-8")
+            manager = HistorySyncManager(
+                argparse.Namespace(db=str(root / "market.sqlite")),
+                threading.RLock(),
+                {"public": public, "private": root / "private.csv", "summary": root / "summary.csv"},
+            )
+            backups = manager._backup_reports()
+            self.assertEqual(len(backups), 1)
+            self.assertTrue(Path(backups[0]).is_file())
+            self.assertEqual(Path(backups[0]).read_text(encoding="utf-8"), "old-public-report")
+            self.assertEqual(public.read_text(encoding="utf-8"), "old-public-report")
 
 
 class MarketWindowTests(unittest.TestCase):
@@ -279,6 +373,62 @@ class SourceEventTests(unittest.TestCase):
 
 
 class LiveDashboardTests(unittest.TestCase):
+    def test_public_report_route_rejects_answer_columns(self) -> None:
+        self.assertTrue(public_report_is_safe(b"slug,checkpoint_utc,current_count\n"))
+        self.assertFalse(public_report_is_safe(
+            b"slug,observed_local_final_count,resolved_bin\n"
+        ))
+
+    def test_live_parser_accepts_multiple_isolated_slugs(self) -> None:
+        args = build_parser().parse_args([
+            "--slug", "market-a",
+            "--extra-slug", "market-b",
+        ])
+        self.assertEqual(args.slug, "market-a")
+        self.assertEqual(args.extra_slug, ["market-b"])
+
+    def test_live_parser_has_safe_fixed_report_defaults(self) -> None:
+        args = build_parser().parse_args(["--slug", "market-a"])
+        self.assertTrue(args.public_report.endswith("hourly_extended_v4_fullprob_public.csv"))
+        self.assertTrue(args.private_report.endswith("hourly_extended_v4_fullprob.csv"))
+        self.assertTrue(args.summary_report.endswith("hourly_extended_v4_fullprob_summary.csv"))
+
+    def test_multi_live_markets_keeps_paper_history_with_its_market(self) -> None:
+        class FakeService:
+            def __init__(self, slug: str) -> None:
+                self.args = type("Args", (), {"slug": slug})()
+
+            def refresh(self):
+                return {"slug": self.args.slug, "recommendation": {"do_not_auto_trade": True}}
+
+            def paper_trades(self, limit: int):
+                return [{"slug": self.args.slug, "limit": limit}]
+
+        service = MultiLiveService.__new__(MultiLiveService)
+        service.services = [FakeService("market-a"), FakeService("market-b")]
+        snapshots = service.live_markets()
+        self.assertEqual([row["slug"] for row in snapshots], ["market-a", "market-b"])
+        self.assertEqual(snapshots[0]["paper_trades"][0]["slug"], "market-a")
+        self.assertEqual(snapshots[1]["paper_trades"][0]["slug"], "market-b")
+
+    def test_manual_multi_market_refresh_forces_each_market(self) -> None:
+        class FakeService:
+            def __init__(self, slug: str) -> None:
+                self.args = type("Args", (), {"slug": slug})()
+                self.forced = []
+
+            def refresh(self, force=False):
+                self.forced.append(force)
+                return {"slug": self.args.slug, "recommendation": {"do_not_auto_trade": True}}
+
+            def paper_trades(self, limit: int):
+                return []
+
+        service = MultiLiveService.__new__(MultiLiveService)
+        service.services = [FakeService("market-a"), FakeService("market-b")]
+        service.live_markets(force=True)
+        self.assertEqual([item.forced for item in service.services], [[True], [True]])
+
     def test_paper_buy_cost_includes_slippage_and_fee_assumption(self) -> None:
         executable, fee = paper_buy_cost(0.50, 0.02, 50)
         self.assertAlmostEqual(executable, 0.505)

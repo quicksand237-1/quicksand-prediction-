@@ -303,12 +303,18 @@
     .live-list-meta { color: var(--muted); font-size: 11px; margin-top: 3px; }
     .live-table-wrap { max-height: 320px; overflow: auto; }
     .chart-wrap { margin-top: 12px; }
-    #historyChart { display: block; width: 100%; height: 280px; background: #fbfcfd; border: 1px solid var(--line); }
+    #historyChart, #residualChart, #globalResidualChart { display: block; width: 100%; height: 280px; background: #fbfcfd; border: 1px solid var(--line); }
     .chart-legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 8px; font-size: 12px; color: var(--muted); }
-    .legend-prediction::before, .legend-current::before, .legend-actual::before { content: ""; display: inline-block; width: 18px; height: 3px; margin: 0 5px 3px 0; }
+    .legend-prediction::before, .legend-current::before, .legend-actual::before, .legend-residual-high::before, .legend-residual-low::before, .legend-residual-zero::before { content: ""; display: inline-block; width: 18px; height: 3px; margin: 0 5px 3px 0; }
     .legend-prediction::before { background: #1e6fa8; }
     .legend-current::before { background: #2f8f67; }
     .legend-actual::before { background: #b34b4b; }
+    .legend-residual-high::before { background: #b33a3a; }
+    .legend-residual-low::before { background: #1769aa; }
+    .legend-residual-zero::before { background: #60717c; border-top: 1px dashed #60717c; height: 0; }
+    .legend-global-actual::before, .legend-global-midpoint::before { content: ""; display: inline-block; width: 18px; height: 3px; margin: 0 5px 3px 0; }
+    .legend-global-actual::before { background: #b33a3a; }
+    .legend-global-midpoint::before { background: #9a6500; border-top: 2px dashed #9a6500; height: 0; }
     .live-recommendation {
       padding: 12px;
       border-left: 3px solid var(--warn);
@@ -333,6 +339,13 @@
       .live-toolbar .button { width: 100%; }
       .metrics .metric:first-child { grid-column: span 2; }
     }
+    .ai-toolbar { display: grid; gap: 12px; margin: 18px 0; padding: 16px; border: 1px solid var(--line, #d8dee8); background: var(--panel, #fff); }
+    .ai-toolbar-grid { display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)); gap: 10px; align-items: end; }
+    .ai-toolbar input, .ai-toolbar select { width: 100%; box-sizing: border-box; }
+    .ai-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+    .ai-note { margin: 0; color: #637083; font-size: 0.88rem; }
+    .ai-output { white-space: pre-wrap; min-height: 72px; max-height: 360px; overflow: auto; margin: 0; padding: 12px; background: #f6f8fb; border: 1px solid var(--line, #d8dee8); }
+    @media (max-width: 760px) { .ai-toolbar-grid { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -342,30 +355,25 @@
         <h1>Musk Count Market Lab</h1>
         <p class="subtitle">七天发帖数市场的一小时预测、竞猜与复盘</p>
       </div>
-      <div class="status"><span id="statusDot" class="status-dot"></span><span id="statusText">等待载入本地 CSV</span></div>
+      <div class="status"><span id="statusDot" class="status-dot"></span><span id="statusText">等待本地服务读取固定复盘</span></div>
     </header>
 
-    <section class="toolbar" aria-label="数据加载">
-      <label>
-        公开预测 CSV
-        <input id="hourlyFile" type="file" accept=".csv,text/csv">
-      </label>
-      <label>
-        私有结算明细 CSV（复盘）
-        <input id="privateFile" type="file" accept=".csv,text/csv">
-      </label>
-      <label>
-        市场汇总 CSV（可选）
-        <input id="summaryFile" type="file" accept=".csv,text/csv">
-      </label>
-      <button id="loadButton" class="button" type="button">加载本地结果</button>
-      <button id="resetButton" class="button secondary" type="button">清除</button>
+    <section class="toolbar" aria-label="固定本地复盘">
+      <button id="loadFixedPublicButton" class="button" type="button">刷新固定公开复盘</button>
+      <button id="loadFixedPrivateButton" class="button secondary" type="button">载入固定私有结算与汇总</button>
+      <span id="localReportStatus" class="live-status">等待本地服务生成或读取固定复盘</span>
     </section>
 
     <section class="live-toolbar" aria-label="实时数据">
       <label>
         实时服务地址
         <input id="liveUrl" value="http://127.0.0.1:8765/api/live" spellcheck="false">
+      </label>
+      <label>
+        实时市场
+        <select id="liveMarketSelect" disabled>
+          <option value="">等待实时市场</option>
+        </select>
       </label>
       <label>
         刷新间隔
@@ -380,10 +388,84 @@
       <span id="liveStatus" class="live-status">未连接本地实时服务</span>
     </section>
 
+    <section class="ai-toolbar" aria-label="historical market sync">
+      <div class="panel-header">
+        <div>
+          <h2>历史市场自动抓取</h2>
+          <p class="ai-note">仅在点击后顺序补充历史市场元数据和发推计数。历史订单簿无法可靠回放；固定复盘会在生成前备份旧文件，不会重训模型。</p>
+        </div>
+        <span id="historySyncStatus" class="badge neutral">未启动</span>
+      </div>
+      <div class="ai-toolbar-grid">
+        <label>开始日期
+          <input id="historyStartDate" type="date" value="2026-02-10">
+        </label>
+        <label>结束日期（不含当天）
+          <input id="historyEndDate" type="date">
+        </label>
+        <label>赔率历史间隔
+          <select id="historyPriceInterval"><option value="1d" selected>1 天</option><option value="1w">1 周</option><option value="1m">1 月</option><option value="max">最大可用</option></select>
+        </label>
+        <label>历史赔率
+          <input id="historyIncludePrices" type="checkbox"> 同时抓取（慢）
+        </label>
+        <label>固定复盘
+          <input id="historyRebuildReports" type="checkbox" checked> 抓取后生成三份固定 CSV
+        </label>
+      </div>
+      <div class="ai-actions">
+        <button id="startHistorySyncButton" class="button" type="button">开始历史抓取</button>
+        <span id="historySyncDetail" class="live-status">默认不抓取赔率；抓取后会更新固定复盘，旧文件将备份。</span>
+      </div>
+    </section>
+
+    <section class="ai-toolbar" aria-label="AI assistant settings">
+      <div class="panel-header">
+        <div>
+          <h2>AI 辅助分析</h2>
+          <p class="ai-note">密钥只提交到本机服务端；AI 只整理已审核语料，不修改本地概率、不生成交易指令。</p>
+        </div>
+        <span id="aiStatus" class="badge neutral">未配置</span>
+      </div>
+      <div class="ai-toolbar-grid">
+        <label>Provider
+          <select id="aiProvider"><option value="openai">OpenAI</option><option value="compatible">OpenAI-compatible</option></select>
+        </label>
+        <label>API 地址
+          <input id="aiBaseUrl" value="https://api.openai.com/v1" spellcheck="false">
+        </label>
+        <label>模型
+          <input id="aiModel" value="gpt-5-mini" spellcheck="false">
+        </label>
+        <label>API 模式
+          <select id="aiMode"><option value="responses">Responses API</option><option value="chat_completions">Chat Completions</option></select>
+        </label>
+      </div>
+      <div class="ai-actions">
+        <button id="refreshNowButton" class="button" type="button">立即抓取更新实时数据</button>
+        <label>公开联系邮箱（可选）
+          <input id="newsContact" type="email" autocomplete="off" placeholder="your-name@proton.me">
+        </label>
+        <button id="newsSyncButton" class="button secondary" type="button">抓取合规新闻语料</button>
+        <span id="newsSyncStatus" class="live-status">尚未抓取合规新闻语料</span>
+        <label>API Key
+          <input id="aiApiKey" type="password" autocomplete="new-password" placeholder="仅本次提交，不回显">
+        </label>
+        <button id="aiSaveButton" class="button" type="button">保存到本机</button>
+        <button id="aiClearButton" class="button secondary" type="button">清除密钥</button>
+        <button id="aiAnalyzeButton" class="button" type="button" disabled>分析当前语料</button>
+      </div>
+    </section>
+
+    <section class="panel" aria-label="AI analysis result">
+      <div class="panel-header"><h2>AI 分析结果</h2><span class="badge neutral">仅供本地研究</span></div>
+      <pre id="aiOutput" class="ai-output">尚未执行 AI 分析。</pre>
+    </section>
+
     <section id="emptyState" class="empty">
       <div>
-        <h2>请选择 `hourly_market_test.csv`</h2>
-        <p>推荐只加载公开预测 CSV；私有结算明细仅在揭晓复盘时选择。</p>
+        <h2>等待固定本地复盘</h2>
+        <p>历史抓取完成后，服务会在固定路径生成公开预测、私有结算明细和市场汇总。</p>
       </div>
     </section>
 
@@ -526,6 +608,15 @@
             </div>
           </div>
 
+          <div id="residualSection" class="section hidden">
+            <h3>回溯预测与官方结算的残差</h3>
+            <div class="chart-wrap">
+              <canvas id="residualChart" height="280"></canvas>
+              <div class="chart-legend"><span class="legend-residual-high">正残差：模型高估</span><span class="legend-residual-low">负残差：模型低估</span><span class="legend-residual-zero">零残差</span></div>
+              <div id="residualNote" class="market-meta">揭晓结算后显示。</div>
+            </div>
+          </div>
+
           <div class="section">
             <h3>实际答案</h3>
             <div id="answerLock" class="lock">已锁定。先记录你的方向判断，再点击“揭晓结算”。</div>
@@ -585,6 +676,12 @@
               <tbody id="summaryBody"></tbody>
             </table>
           </div>
+          <div class="chart-wrap">
+            <h3>全局结算预测残差</h3>
+            <canvas id="globalResidualChart" height="280"></canvas>
+            <div class="chart-legend"><span class="legend-global-actual">实线：最终预测 - 本地最终观测</span><span class="legend-global-midpoint">虚线：最终预测 - 官方区间中点代理</span></div>
+            <div id="globalResidualNote" class="market-meta">揭晓结算后显示全部已结算市场。</div>
+          </div>
         </div>
       </section>
       <p class="footer-note">这是研究和模拟工具，不构成投资建议。历史回放使用的本地帖子可能不完整，尤其不能自动还原被删除帖子。</p>
@@ -606,7 +703,14 @@
         mode: "guess",
         liveTimer: null,
         liveBusy: false,
-        livePayload: null
+        livePayload: null,
+        liveSnapshots: [],
+        liveMarket: "",
+        historyTimer: null,
+        historyBusy: false,
+        lastAutoReportFinish: "",
+        newsTimer: null,
+        newsBusy: false
       };
 
       const $ = (id) => document.getElementById(id);
@@ -624,6 +728,10 @@
         const parsed = number(value);
         return parsed == null ? "-" : `${(parsed * 100).toFixed(digits)}%`;
       };
+
+      if (window.location.protocol === "http:" || window.location.protocol === "https:") {
+        $("liveUrl").value = `${window.location.origin}/api/live`;
+      }
 
       function parseCsv(source) {
         const rows = [];
@@ -675,6 +783,84 @@
           reader.onerror = () => reject(new Error("读取文件失败"));
           reader.readAsText(file, "utf-8");
         });
+      }
+
+      function reportEndpoint(name) {
+        const endpoint = new URL($("liveUrl").value.trim(), window.location.href);
+        endpoint.pathname = `/api/reports/${name}`;
+        endpoint.search = "";
+        return endpoint;
+      }
+
+      async function fetchFixedReport(name, privateReport = false) {
+        const options = privateReport ? {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+          cache: "no-store"
+        } : { cache: "no-store" };
+        const response = await fetch(reportEndpoint(name), options);
+        const textValue = await response.text();
+        if (!response.ok) {
+          try {
+            const error = JSON.parse(textValue);
+            throw new Error(error.message || "读取固定复盘文件失败");
+          } catch (error) {
+            if (error instanceof SyntaxError) {
+              throw new Error(`读取固定复盘文件失败（HTTP ${response.status}）`);
+            }
+            throw error;
+          }
+        }
+        return textValue;
+      }
+
+      async function loadFixedPublicReport() {
+        $("loadFixedPublicButton").disabled = true;
+        text("localReportStatus", "正在读取固定公开预测文件……");
+        try {
+          const rows = parseCsv(await fetchFixedReport("public"));
+          if (!rows.length) throw new Error("固定公开预测文件没有可用记录");
+          state.summaries = [];
+          state.revealed = false;
+          state.mode = "guess";
+          $("guessMode").classList.add("active");
+          $("reviewMode").classList.remove("active");
+          loadRows(rows, []);
+          text("localReportStatus", `已加载固定公开预测：${rows.length} 条记录；结算答案未加载`);
+        } catch (error) {
+          text("localReportStatus", `固定公开预测读取失败：${error.message}`);
+        } finally {
+          $("loadFixedPublicButton").disabled = false;
+        }
+      }
+
+      async function loadFixedPrivateReports() {
+        if (!state.rows.length) {
+          text("localReportStatus", "请先加载固定公开预测，再显式加载私有结算");
+          return;
+        }
+        $("loadFixedPrivateButton").disabled = true;
+        text("localReportStatus", "正在读取固定私有结算与汇总文件……");
+        try {
+          const [privateText, summaryText] = await Promise.all([
+            fetchFixedReport("private", true),
+            fetchFixedReport("summary", true)
+          ]);
+          const privateRows = parseCsv(privateText)
+            .filter((row) => row.slug && row.checkpoint_utc)
+            .sort((left, right) => rowTime(left) - rowTime(right));
+          if (!privateRows.length) throw new Error("固定私有结算文件没有可用记录");
+          state.privateRows = privateRows;
+          state.summaries = parseCsv(summaryText);
+          state.revealed = false;
+          update();
+          text("localReportStatus", "私有结算已显式载入；仍需点击“揭晓结算”才显示答案");
+        } catch (error) {
+          text("localReportStatus", `固定私有结算读取失败：${error.message}`);
+        } finally {
+          $("loadFixedPrivateButton").disabled = false;
+        }
       }
 
       function rowTime(row) {
@@ -777,6 +963,106 @@
         renderLiveList("liveNews", payload.news, "暂无新闻或新闻源不可用");
       }
 
+      function renderLiveMarkets(snapshots) {
+        state.liveSnapshots = Array.isArray(snapshots) ? snapshots : [];
+        const available = state.liveSnapshots.filter((row) => row && row.slug);
+        if (!available.length) {
+          $("liveMarketSelect").innerHTML = "<option value=\"\">暂无可用市场</option>";
+          $("liveMarketSelect").disabled = true;
+          return;
+        }
+        if (!state.liveMarket || !available.some((row) => row.slug === state.liveMarket)) {
+          state.liveMarket = available[0].slug;
+        }
+        $("liveMarketSelect").innerHTML = available.map((row) =>
+          `<option value="${escapeHtml(row.slug)}">${escapeHtml(row.slug)}</option>`
+        ).join("");
+        $("liveMarketSelect").value = state.liveMarket;
+        $("liveMarketSelect").disabled = false;
+        renderLive(available.find((row) => row.slug === state.liveMarket));
+      }
+
+      function aiEndpoint(path) {
+        const endpoint = new URL($("liveUrl").value.trim(), window.location.href);
+        if (!["127.0.0.1", "localhost", "[::1]", "::1"].includes(endpoint.hostname)) {
+          throw new Error("AI 密钥路径只允许连接本机实时服务");
+        }
+        endpoint.pathname = path;
+        endpoint.search = "";
+        return endpoint;
+      }
+
+      async function aiRequest(path, body) {
+        const response = await fetch(aiEndpoint(path), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body || {}),
+          cache: "no-store"
+        });
+        const responseText = await response.text();
+        let payload;
+        try { payload = JSON.parse(responseText); } catch (_) { throw new Error(`AI 服务返回了非 JSON 数据（HTTP ${response.status}）`); }
+        if (!response.ok || payload.ok === false) throw new Error(payload.message || "AI 服务返回错误");
+        return payload;
+      }
+
+      async function loadAIStatus() {
+        try {
+          const response = await fetch(aiEndpoint("/api/ai/status"), { cache: "no-store" });
+          const payload = await response.json();
+          if (!response.ok || payload.ok === false) throw new Error(payload.message || "无法读取 AI 状态");
+          $("aiProvider").value = payload.provider || "openai";
+          $("aiBaseUrl").value = payload.base_url || "https://api.openai.com/v1";
+          $("aiModel").value = payload.model || "gpt-5-mini";
+          $("aiMode").value = payload.mode || "responses";
+          const configured = Boolean(payload.configured);
+          $("aiAnalyzeButton").disabled = !configured;
+          $("aiStatus").className = `badge ${configured ? "good" : "neutral"}`;
+          text("aiStatus", configured ? `已配置（${payload.storage || "本机"}，末四位 ${payload.key_last_four || "????"}）` : "未配置");
+        } catch (error) {
+          text("aiStatus", `不可用：${error.message}`);
+          $("aiAnalyzeButton").disabled = true;
+        }
+      }
+
+      async function saveAIConfig() {
+        const key = $("aiApiKey").value;
+        if (!key.trim()) { text("aiStatus", "请输入 API Key"); return; }
+        $("aiSaveButton").disabled = true;
+        try {
+          await aiRequest("/api/ai/config", {
+            api_key: key,
+            provider: $("aiProvider").value,
+            base_url: $("aiBaseUrl").value,
+            model: $("aiModel").value,
+            mode: $("aiMode").value
+          });
+          $("aiApiKey").value = "";
+          await loadAIStatus();
+          text("aiOutput", "密钥已保存到本机安全存储。点击“分析当前语料”才会产生一次外部 API 请求。");
+        } catch (error) { text("aiStatus", `保存失败：${error.message}`); }
+        finally { $("aiSaveButton").disabled = false; }
+      }
+
+      async function clearAIConfig() {
+        try {
+          await aiRequest("/api/ai/clear", {});
+          $("aiApiKey").value = "";
+          await loadAIStatus();
+          text("aiOutput", "本机 AI 密钥已清除。");
+        } catch (error) { text("aiStatus", `清除失败：${error.message}`); }
+      }
+
+      async function analyzeAI() {
+        $("aiAnalyzeButton").disabled = true;
+        text("aiOutput", "正在提交已审核语料进行结构化分析……");
+        try {
+          const payload = await aiRequest("/api/ai/analyze", {});
+          text("aiOutput", JSON.stringify(payload, null, 2));
+        } catch (error) { text("aiOutput", `AI 分析未执行：${error.message}`); }
+        finally { await loadAIStatus(); }
+      }
+
       function renderPaperTrades(rows) {
         $("livePaperTradesBody").innerHTML = (Array.isArray(rows) ? rows : []).map((row) => {
           const result = row.net_pnl == null ? "-" : fmt(row.net_pnl, 4);
@@ -789,21 +1075,187 @@
         state.liveBusy = true;
         try {
           const liveEndpoint = new URL($("liveUrl").value.trim(), window.location.href);
-          const tradesEndpoint = new URL("/api/paper-trades?limit=12", liveEndpoint.origin);
-          const [response, tradesResponse] = await Promise.all([
-            fetch(liveEndpoint, { cache: "no-store" }),
-            fetch(tradesEndpoint, { cache: "no-store" }),
-          ]);
-          const payload = await response.json();
-          payload.paper_trades = tradesResponse.ok ? await tradesResponse.json() : [];
+          liveEndpoint.pathname = "/api/live-markets";
+          liveEndpoint.search = "";
+          const response = await fetch(liveEndpoint, { cache: "no-store" });
+          const responseText = await response.text();
+          let payload;
+          try {
+            payload = JSON.parse(responseText);
+          } catch (_) {
+            if (response.status === 404) {
+              throw new Error("本地实时服务版本过旧，尚不支持双盘接口。请在旧服务窗口按 Ctrl+C 停止，再运行 start_live_dashboard.ps1。");
+            }
+            throw new Error(`实时服务返回了非 JSON 数据（HTTP ${response.status}）。请检查服务是否已重新启动。`);
+          }
           if (!response.ok || payload.ok === false) throw new Error(payload.message || "实时服务返回错误");
           state.livePayload = payload;
-          renderLive(payload);
+          renderLiveMarkets(payload);
         } catch (error) {
           $("statusDot").classList.remove("ready");
           $("liveStatus").textContent = `实时服务错误：${error.message}`;
         } finally {
           state.liveBusy = false;
+        }
+      }
+
+      async function refreshNow() {
+        if (state.liveBusy) return;
+        state.liveBusy = true;
+        $("refreshNowButton").disabled = true;
+        $("liveStatus").textContent = "正在抓取 XTracker、Gamma、CLOB、TSLA 和新闻……";
+        try {
+          const endpoint = new URL($("liveUrl").value.trim(), window.location.href);
+          endpoint.pathname = "/api/refresh-now";
+          endpoint.search = "";
+          const response = await fetch(endpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+            cache: "no-store"
+          });
+          const responseText = await response.text();
+          const payload = JSON.parse(responseText);
+          if (!response.ok || payload.ok === false) throw new Error(payload.message || "立即刷新失败");
+          renderLiveMarkets(payload.markets || []);
+          $("liveStatus").textContent = "已完成立即刷新，实时数据已写入本地数据库";
+        } catch (error) {
+          $("liveStatus").textContent = `立即刷新失败：${error.message}`;
+        } finally {
+          state.liveBusy = false;
+          $("refreshNowButton").disabled = false;
+        }
+      }
+
+      function historyEndpoint(path) {
+        const endpoint = new URL($("liveUrl").value.trim(), window.location.href);
+        endpoint.pathname = path;
+        endpoint.search = "";
+        return endpoint;
+      }
+
+      function renderHistorySync(sync) {
+        const stateLabel = sync && sync.state ? sync.state : "idle";
+        const labels = { idle: "未启动", running: "抓取中", succeeded: "已完成", failed: "失败" };
+        text("historySyncStatus", labels[stateLabel] || stateLabel);
+        $("historySyncStatus").className = `badge ${stateLabel === "failed" ? "bad" : stateLabel === "succeeded" ? "good" : stateLabel === "running" ? "warn" : "neutral"}`;
+        if (!sync) return;
+        const progress = `${sync.completed || 0}/${sync.total || 0}`;
+        const current = sync.current_slug ? `当前：${sync.current_slug}` : "";
+        const outcome = `成功 ${sync.succeeded || 0}，失败 ${sync.failed || 0}`;
+        $("historySyncDetail").textContent = `${sync.message || ""} ${progress}。${outcome}。${current}`.trim();
+        $("startHistorySyncButton").disabled = stateLabel === "running" || state.historyBusy;
+        if (stateLabel === "succeeded" && sync.report_result && sync.report_result.ok && sync.finished_at_utc !== state.lastAutoReportFinish) {
+          state.lastAutoReportFinish = sync.finished_at_utc;
+          loadFixedPublicReport();
+        }
+        if (stateLabel !== "running" && state.historyTimer) {
+          clearInterval(state.historyTimer);
+          state.historyTimer = null;
+        }
+      }
+
+      async function pollHistorySync() {
+        try {
+          const response = await fetch(historyEndpoint("/api/history-sync/status"), { cache: "no-store" });
+          const payload = await response.json();
+          if (!response.ok || payload.ok === false) throw new Error(payload.message || "历史状态读取失败");
+          renderHistorySync(payload.history_sync);
+        } catch (error) {
+          $("historySyncDetail").textContent = `历史抓取状态读取失败：${error.message}`;
+        }
+      }
+
+      async function startHistorySync() {
+        if (state.historyBusy) return;
+        state.historyBusy = true;
+        $("startHistorySyncButton").disabled = true;
+        $("historySyncDetail").textContent = "正在提交历史抓取任务…";
+        try {
+          const response = await fetch(historyEndpoint("/api/history-sync"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              start: $("historyStartDate").value,
+              end: $("historyEndDate").value,
+              include_prices: $("historyIncludePrices").checked,
+              price_interval: $("historyPriceInterval").value,
+              rebuild_reports: $("historyRebuildReports").checked
+            }),
+            cache: "no-store"
+          });
+          const payload = await response.json();
+          if (!response.ok || payload.ok === false) throw new Error(payload.message || "历史抓取未能启动");
+          renderHistorySync(payload.history_sync);
+          if (!state.historyTimer) state.historyTimer = setInterval(pollHistorySync, 1500);
+        } catch (error) {
+          $("historySyncStatus").className = "badge bad";
+          text("historySyncStatus", "未启动");
+          $("historySyncDetail").textContent = `历史抓取启动失败：${error.message}`;
+        } finally {
+          state.historyBusy = false;
+          if (!state.historyTimer) $("startHistorySyncButton").disabled = false;
+        }
+      }
+
+      async function autoLoadFixedPublicReport() {
+        try {
+          const response = await fetch(reportEndpoint("status"), { cache: "no-store" });
+          const payload = await response.json();
+          if (!response.ok || payload.ok === false) throw new Error(payload.message || "固定复盘状态读取失败");
+          if (payload.public && payload.public.exists) await loadFixedPublicReport();
+          else text("localReportStatus", "固定公开复盘尚未生成；可在历史市场自动抓取中勾选“生成三份固定 CSV”");
+        } catch (error) {
+          text("localReportStatus", `固定复盘状态读取失败：${error.message}`);
+        }
+      }
+
+      function renderNewsSync(sync) {
+        const status = sync && sync.state ? sync.state : "idle";
+        const labels = { idle: "未抓取", running: "新闻抓取中", succeeded: "新闻已更新", failed: "新闻抓取失败" };
+        const errors = sync && Array.isArray(sync.error_summaries) && sync.error_summaries.length ? `；${sync.error_summaries.join(" | ")}` : "";
+        const detail = sync ? `${labels[status] || status}；文档 ${sync.documents_seen || 0}，合规语料 ${sync.eligible_documents || 0}，错误 ${sync.errors || 0}${errors}` : "未抓取";
+        $("newsSyncStatus").textContent = detail;
+        $("newsSyncButton").disabled = status === "running" || state.newsBusy;
+        if (status !== "running" && state.newsTimer) {
+          clearInterval(state.newsTimer);
+          state.newsTimer = null;
+        }
+      }
+
+      async function pollNewsSync() {
+        try {
+          const response = await fetch(historyEndpoint("/api/news-sync/status"), { cache: "no-store" });
+          const payload = await response.json();
+          if (!response.ok || payload.ok === false) throw new Error(payload.message || "新闻状态读取失败");
+          renderNewsSync(payload.news_sync);
+        } catch (error) {
+          $("newsSyncStatus").textContent = `新闻状态读取失败：${error.message}`;
+        }
+      }
+
+      async function startNewsSync() {
+        if (state.newsBusy) return;
+        state.newsBusy = true;
+        $("newsSyncButton").disabled = true;
+        const contact = $("newsContact").value.trim();
+        $("newsContact").value = "";
+        try {
+          const response = await fetch(historyEndpoint("/api/news-sync"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ contact }),
+            cache: "no-store"
+          });
+          const payload = await response.json();
+          if (!response.ok || payload.ok === false) throw new Error(payload.message || "新闻抓取未能启动");
+          renderNewsSync(payload.news_sync);
+          if (!state.newsTimer) state.newsTimer = setInterval(pollNewsSync, 1500);
+        } catch (error) {
+          $("newsSyncStatus").textContent = `新闻抓取启动失败：${error.message}`;
+        } finally {
+          state.newsBusy = false;
+          if (!state.newsTimer) $("newsSyncButton").disabled = false;
         }
       }
 
@@ -868,6 +1320,105 @@
         $("binProbabilityBody").innerHTML = entries.map(([label, probability]) =>
           `<tr><td>${escapeHtml(label)}</td><td>${pct(probability)}</td></tr>`
         ).join("") || `<tr><td colspan="2">当前 CSV 没有完整区间概率字段，请重新生成 fullprob 报告</td></tr>`;
+      }
+
+      function officialMidpoint(row) {
+        const lower = number(row.resolved_lower);
+        const upper = number(row.resolved_upper);
+        return lower == null || upper == null ? null : (lower + upper) / 2;
+      }
+
+      function drawResidualChart(rows) {
+        const section = $("residualSection");
+        const canvas = $("residualChart");
+        if (!section || !canvas) return;
+        const canReveal = state.revealed && state.privateRows.length > 0;
+        section.classList.toggle("hidden", !canReveal);
+        if (!canReveal) return;
+
+        const residuals = rows.map((item) => {
+          const merged = privateRowFor(item);
+          const forecast = number(merged.model_forecast_final_count);
+          const midpoint = officialMidpoint(merged);
+          return forecast == null || midpoint == null ? null : forecast - midpoint;
+        });
+        const usable = residuals.filter((value) => value != null);
+        if (!usable.length) {
+          const ratio = window.devicePixelRatio || 1;
+          const width = Math.max(320, canvas.clientWidth || 760);
+          canvas.width = width * ratio;
+          canvas.height = 280 * ratio;
+          $("residualNote").textContent = "该市场没有带上下界的官方结算区间，无法计算区间中点代理残差。";
+          return;
+        }
+
+        const width = Math.max(320, canvas.clientWidth || 760);
+        const height = 280;
+        const ratio = window.devicePixelRatio || 1;
+        canvas.width = width * ratio;
+        canvas.height = height * ratio;
+        const ctx = canvas.getContext("2d");
+        ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+        ctx.clearRect(0, 0, width, height);
+        const margin = { left: 54, right: 18, top: 18, bottom: 34 };
+        const plotWidth = width - margin.left - margin.right;
+        const plotHeight = height - margin.top - margin.bottom;
+        const maxAbsolute = Math.max(1, ...usable.map((value) => Math.abs(value))) * 1.12;
+        const x = (index) => margin.left + (rows.length <= 1 ? 0 : index / (rows.length - 1)) * plotWidth;
+        const y = (value) => margin.top + plotHeight / 2 - (value / maxAbsolute) * (plotHeight / 2);
+
+        ctx.font = "11px sans-serif";
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = "#d7e0e7";
+        ctx.fillStyle = "#60717c";
+        for (let tick = -2; tick <= 2; tick += 1) {
+          const value = maxAbsolute * tick / 2;
+          const lineY = y(value);
+          ctx.beginPath();
+          ctx.moveTo(margin.left, lineY);
+          ctx.lineTo(width - margin.right, lineY);
+          ctx.stroke();
+          ctx.fillText(`${value > 0 ? "+" : ""}${Math.round(value)}`, 8, lineY + 4);
+        }
+        const zeroY = y(0);
+        ctx.beginPath();
+        ctx.strokeStyle = "#60717c";
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([5, 4]);
+        ctx.moveTo(margin.left, zeroY);
+        ctx.lineTo(width - margin.right, zeroY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        ctx.beginPath();
+        ctx.strokeStyle = "#60717c";
+        ctx.lineWidth = 1.5;
+        let started = false;
+        residuals.forEach((value, index) => {
+          if (value == null) {
+            started = false;
+            return;
+          }
+          if (!started) {
+            ctx.moveTo(x(index), y(value));
+            started = true;
+          } else {
+            ctx.lineTo(x(index), y(value));
+          }
+        });
+        ctx.stroke();
+        residuals.forEach((value, index) => {
+          if (value == null) return;
+          ctx.beginPath();
+          ctx.fillStyle = value > 0 ? "#b33a3a" : value < 0 ? "#1769aa" : "#2f8f67";
+          ctx.arc(x(index), y(value), 3, 0, Math.PI * 2);
+          ctx.fill();
+        });
+        ctx.fillStyle = "#60717c";
+        ctx.fillText(rows[0]?.checkpoint_utc?.slice(5, 16) || "起点", margin.left, height - 10);
+        const endLabel = rows[rows.length - 1]?.checkpoint_utc?.slice(5, 16) || "终点";
+        ctx.fillText(endLabel, Math.max(margin.left, width - margin.right - ctx.measureText(endLabel).width), height - 10);
+        $("residualNote").textContent = "残差 = 当时模型预测最终数 - 官方结算区间中点。正值表示高估，负值表示低估；它不是相对精确官方最终数的误差。开放尾部区间因没有可靠中点会留空。";
       }
 
       function drawHistoryChart(rows) {
@@ -966,6 +1517,7 @@
         const marketText = signal.hasMarketData ? `盘口隐含 ${fmt(row.market_expected_count)}` : "历史盘口未采集";
         text("guessDetail", `模型 ${fmt(row.model_forecast_final_count)} · ${marketText} · 当前累计 ${row.current_count || 0} · ${probabilityText}`);
         drawHistoryChart(rows);
+        drawResidualChart(rows);
 
         const canShow = state.revealed;
         $("answerLock").classList.toggle("hidden", canShow);
@@ -1026,49 +1578,126 @@
           const verified = marketRows.every((row) => bool(row.observed_count_verified));
           return `<tr><td>${escapeHtml(slug)}</td><td>${marketRows.length}</td><td>${fmt(marketMae, 2)}</td><td>${escapeHtml(marketRows[0].resolved_bin || "-")}</td><td>${escapeHtml(marketRows[0].observed_local_final_count || "-")}</td><td><span class="badge ${verified ? "good" : "warn"}">${verified ? "已核验" : "探索性"}</span></td></tr>`;
         }).join("");
+        drawGlobalResidualChart();
       }
 
-      async function load() {
-        try {
-          const hourly = await readFile($("hourlyFile"));
-          const publicRows = parseCsv(hourly);
-          const privateRows = $("privateFile").files && $("privateFile").files[0]
-            ? parseCsv(await readFile($("privateFile"))) : (
-              publicRows.some((row) => row.observed_local_final_count !== "")
-                ? publicRows : []
-            );
-          const summary = $("summaryFile").files && $("summaryFile").files[0]
-            ? parseCsv(await readFile($("summaryFile"))) : [];
-          state.summaries = summary;
-          state.revealed = false;
-          state.mode = "guess";
-          $("guessMode").classList.add("active");
-          $("reviewMode").classList.remove("active");
-          loadRows(publicRows, privateRows);
-        } catch (error) {
-          text("statusText", error.message);
-          $("statusDot").classList.remove("ready");
+      function drawGlobalResidualChart() {
+        const canvas = $("globalResidualChart");
+        if (!canvas) return;
+        const grouped = new Map();
+        state.privateRows.forEach((row) => {
+          if (!row.slug || !String(row.resolved_bin || "").trim()) return;
+          if (!grouped.has(row.slug)) grouped.set(row.slug, []);
+          grouped.get(row.slug).push(row);
+        });
+        const markets = [...grouped.entries()].map(([slug, marketRows]) => {
+          const ordered = marketRows.slice().sort((left, right) => rowTime(left) - rowTime(right));
+          const finalRow = ordered.slice().reverse().find((row) =>
+            number(row.model_forecast_final_count) != null && number(row.observed_local_final_count) != null
+          );
+          if (!finalRow) return null;
+          const forecast = number(finalRow.model_forecast_final_count);
+          const actual = number(finalRow.observed_local_final_count);
+          const midpoint = officialMidpoint(finalRow);
+          return {
+            slug,
+            checkpoint: finalRow.checkpoint_utc || "",
+            actualResidual: forecast - actual,
+            midpointResidual: midpoint == null ? null : forecast - midpoint
+          };
+        }).filter(Boolean).sort((left, right) => Date.parse(left.checkpoint) - Date.parse(right.checkpoint));
+
+        if (!markets.length) {
+          canvas.width = 760;
+          canvas.height = 280;
+          $("globalResidualNote").textContent = "没有同时具备官方结算区间、最终预测和本地最终观测的已结算市场。";
+          return;
         }
+        const actualResiduals = markets.map((item) => item.actualResidual);
+        const midpointResiduals = markets.map((item) => item.midpointResidual);
+        const usable = [...actualResiduals, ...midpointResiduals].filter((value) => value != null);
+        const width = Math.max(320, canvas.clientWidth || 760);
+        const height = 280;
+        const ratio = window.devicePixelRatio || 1;
+        canvas.width = width * ratio;
+        canvas.height = height * ratio;
+        const ctx = canvas.getContext("2d");
+        ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+        ctx.clearRect(0, 0, width, height);
+        const margin = { left: 54, right: 18, top: 18, bottom: 36 };
+        const plotWidth = width - margin.left - margin.right;
+        const plotHeight = height - margin.top - margin.bottom;
+        const maxAbsolute = Math.max(1, ...usable.map((value) => Math.abs(value))) * 1.12;
+        const x = (index) => margin.left + (markets.length <= 1 ? 0 : index / (markets.length - 1)) * plotWidth;
+        const y = (value) => margin.top + plotHeight / 2 - (value / maxAbsolute) * (plotHeight / 2);
+        ctx.font = "11px sans-serif";
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = "#d7e0e7";
+        ctx.fillStyle = "#60717c";
+        for (let tick = -2; tick <= 2; tick += 1) {
+          const value = maxAbsolute * tick / 2;
+          const lineY = y(value);
+          ctx.beginPath();
+          ctx.moveTo(margin.left, lineY);
+          ctx.lineTo(width - margin.right, lineY);
+          ctx.stroke();
+          ctx.fillText(`${value > 0 ? "+" : ""}${Math.round(value)}`, 8, lineY + 4);
+        }
+        ctx.beginPath();
+        ctx.strokeStyle = "#60717c";
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([5, 4]);
+        ctx.moveTo(margin.left, y(0));
+        ctx.lineTo(width - margin.right, y(0));
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        const drawSeries = (values, color, dash = []) => {
+          ctx.beginPath();
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 2;
+          ctx.setLineDash(dash);
+          let started = false;
+          values.forEach((value, index) => {
+            if (value == null) { started = false; return; }
+            if (!started) { ctx.moveTo(x(index), y(value)); started = true; }
+            else ctx.lineTo(x(index), y(value));
+          });
+          ctx.stroke();
+          ctx.setLineDash([]);
+        };
+        drawSeries(actualResiduals, "#b33a3a");
+        drawSeries(midpointResiduals, "#9a6500", [6, 4]);
+        actualResiduals.forEach((value, index) => {
+          ctx.beginPath();
+          ctx.fillStyle = value > 0 ? "#b33a3a" : value < 0 ? "#1769aa" : "#2f8f67";
+          ctx.arc(x(index), y(value), 3, 0, Math.PI * 2);
+          ctx.fill();
+        });
+        ctx.fillStyle = "#60717c";
+        const firstLabel = markets[0].checkpoint.slice(0, 10) || "起点";
+        const lastLabel = markets[markets.length - 1].checkpoint.slice(0, 10) || "终点";
+        ctx.fillText(firstLabel, margin.left, height - 10);
+        ctx.fillText(lastLabel, Math.max(margin.left, width - margin.right - ctx.measureText(lastLabel).width), height - 10);
+        const midpointCount = midpointResiduals.filter((value) => value != null).length;
+        $("globalResidualNote").textContent = `按结算时间排序，共 ${markets.length} 个已结算市场；实线使用本地最终观测，共 ${markets.length} 点，虚线使用官方区间中点代理，共 ${midpointCount} 点。正值表示最终预测高估，负值表示低估。`;
       }
 
-      $("loadButton").addEventListener("click", load);
-      $("resetButton").addEventListener("click", () => {
-        stopLive();
-        state.rows = [];
-        state.privateRows = [];
-        state.marketRows = new Map();
-        state.market = "";
-        state.revealed = false;
-        $("hourlyFile").value = "";
-        $("privateFile").value = "";
-        $("summaryFile").value = "";
-        $("workspace").classList.add("hidden");
-        $("emptyState").classList.remove("hidden");
-        $("statusDot").classList.remove("ready");
-        text("statusText", "等待载入本地 CSV");
-      });
+      $("loadFixedPublicButton").addEventListener("click", loadFixedPublicReport);
+      $("loadFixedPrivateButton").addEventListener("click", loadFixedPrivateReports);
       $("startLiveButton").addEventListener("click", startLive);
+      $("refreshNowButton").addEventListener("click", refreshNow);
+      $("startHistorySyncButton").addEventListener("click", startHistorySync);
+      $("newsSyncButton").addEventListener("click", startNewsSync);
       $("stopLiveButton").addEventListener("click", stopLive);
+      $("aiSaveButton").addEventListener("click", saveAIConfig);
+      $("aiClearButton").addEventListener("click", clearAIConfig);
+      $("aiAnalyzeButton").addEventListener("click", analyzeAI);
+      $("liveMarketSelect").addEventListener("change", (event) => {
+        state.liveMarket = event.target.value;
+        const selected = state.liveSnapshots.find((row) => row.slug === state.liveMarket);
+        if (selected) renderLive(selected);
+      });
       $("marketSelect").addEventListener("change", (event) => {
         state.market = event.target.value;
         state.index = 0;
@@ -1095,6 +1724,11 @@
         state.revealed = !state.revealed;
         update();
       });
+      $("historyEndDate").value = new Date().toISOString().slice(0, 10);
+      pollHistorySync();
+      pollNewsSync();
+      autoLoadFixedPublicReport();
+      loadAIStatus();
     })();
   </script>
 </body>

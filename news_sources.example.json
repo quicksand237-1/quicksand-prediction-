@@ -1,0 +1,49 @@
+{
+  "sources": [
+    {
+      "source_id": "sec_tesla_filings",
+      "name": "SEC Tesla filings",
+      "domain": "sec.gov",
+      "tier": 1,
+      "reliability": 0.98,
+      "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=1318605&type=8-K&dateb=&owner=exclude&count=40&output=atom",
+      "allowed_topics": ["tesla", "policy", "finance"],
+      "allow_title_only": true,
+      "content_policy": "metadata_excerpt",
+      "notes": "官方监管公开源；请求频率需遵守 SEC 规则。"
+    },
+    {
+      "source_id": "tesla_news_discovery",
+      "name": "Tesla news discovery",
+      "domain": "news.google.com",
+      "tier": 3,
+      "reliability": 0.5,
+      "url": "https://news.google.com/rss/search?q=Tesla+Elon+Musk+when%3A7d&hl=en-US&gl=US&ceid=US%3Aen",
+      "discovery_only": true,
+      "content_policy": "discovery_only",
+      "allowed_topics": ["tesla", "social"]
+    },
+    {
+      "source_id": "spacex_news_discovery",
+      "name": "SpaceX news discovery",
+      "domain": "news.google.com",
+      "tier": 3,
+      "reliability": 0.5,
+      "url": "https://news.google.com/rss/search?q=SpaceX+Elon+Musk+when%3A7d&hl=en-US&gl=US&ceid=US%3Aen",
+      "discovery_only": true,
+      "content_policy": "discovery_only",
+      "allowed_topics": ["spacex", "travel"]
+    },
+    {
+      "source_id": "xai_news_discovery",
+      "name": "xAI news discovery",
+      "domain": "news.google.com",
+      "tier": 3,
+      "reliability": 0.5,
+      "url": "https://news.google.com/rss/search?q=xAI+Grok+Elon+Musk+when%3A7d&hl=en-US&gl=US&ceid=US%3Aen",
+      "discovery_only": true,
+      "content_policy": "discovery_only",
+      "allowed_topics": ["xai", "social"]
+    }
+  ]
+}
