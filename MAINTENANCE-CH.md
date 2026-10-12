@@ -1,5 +1,12 @@
 # 中文维护日志
 
+## M-20261013-GITHUB-PUBLISH
+
+- 发布结果：已添加远程 `https://github.com/quicksand237-1/quicksand-prediction-.git`，以普通非强制方式发布两个分支：`pre-volatility` 指向历史提交 `6bac487`，`backtest-audit-v1` 指向当前完整提交 `563f06c`。
+- 当前分支内容：包含源码、测试、前端、启动器脚本、历史抓取和动态研究说明；`README.md` 已补充描述性维护日志、前端核心功能和使用方法。
+- 排除复核：远程跟踪文件不含 `data/`、SQLite、CSV、日志、`.env`、`.ai-config.json`、模型文件或 `dist_dashboard_launcher/`；构建 exe 可由脚本重新生成。
+- 远程安全：未使用强制推送，未覆盖远程已有内容；GitHub 远程只读复核确认两个分支存在。本轮未启动服务、未访问 Polymarket 接口、未写入 SQLite/CSV/模型、未重训或运行生产回放；`do_not_auto_trade=true` 保持。
+
 ## M-20261012-GITHUB-README-PREP
 
 - 实际修改：`README.md` 增加项目阶段性描述日志、前端 slug 功能分区、启动命令、离线检查、数据发布边界和安全约束；保留原有英文组件说明作为兼容参考。
