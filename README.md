@@ -1,3 +1,81 @@
+# Polymarket 预测与历史研究台
+
+本仓库是一个本地研究项目，用于整理 Polymarket 市场规则、历史价格、盘口、发帖计数、新闻上下文和纸面预测结果。数据链路保持为：
+
+```text
+本地数据/受控采集 -> 模型黑箱 -> 决策限制 -> 前端研究显示
+```
+
+项目只做离线回放、历史审计、实时观察和纸面模拟。`do_not_auto_trade=true` 是永久约束；项目没有钱包、私钥、签名、下单 API、自动下注或真实资金入口。
+
+## 项目日志摘要
+
+维护过程记录在 `MAINTENANCE-CH.md`，运行边界和排障步骤记录在 `RUNBOOK-CH.md`，持续交接状态记录在 `CONTINUATION-CONTEXT-CH.md`。主要阶段如下：
+
+- 初始阶段建立 Gamma 市场发现、XTracker 发帖计数、CLOB 价格/盘口、SQLite 归档、Ridge 概率预测和纸面回放。
+- 纸面预测阶段增加按市场和时间点隔离的回放、盘口深度与成交条件、公开预测/私有结算揭晓、残差和评分显示。
+- 实时归档阶段增加约 30 秒 REST/RSS 轮询、市场开盘时间对齐、实时快照、来源状态和缺口证据。该轮询不是 WebSocket，也不是毫秒级实时。
+- 历史完整性阶段增加 Data API v2 分页、15 天窗口拆分、每次约 450 行的请求安全上限、5 分钟/30 分钟/3 小时保留期路由和源精度审计。粗粒度记录不会伪装成 5 分钟数据，也不会用当前盘口填补历史盘口。
+- 动态研究阶段增加开盘后时间、近期发帖速率、市场预期差和来源年龄等特征，以及独立的映射、固定预测时点和 walk-forward 纸面研究。动态研究结果不自动进入交易决策。
+- 数据整理阶段增加只读扫描、重复文件识别和生成合并副本；数据库、备份、订单簿、原始帖子、模型和实时采集源默认受保护。
+
+每条维护记录都说明是否访问外部接口、是否写入 SQLite/CSV/模型、是否重训或回放，以及 `do_not_auto_trade` 状态。
+
+## 前端核心功能
+
+启动研究台后，页面顶部按 slug 分区进入不同工作流：
+
+- `#live-capture`：实时市场、发帖计数、赔率、盘口、新闻和来源状态。显示“正在正常记录当前市场信息”或“已尝试但缺失”，不会把缺失伪装成零值。
+- `#history-acquisition`：历史市场发现、价格抓取、请求窗口、实际源精度、分页和失败证据。默认目标是 5 分钟；超过保留期或目标精度失败时显示真实的 30 分钟/3 小时回退来源。
+- `#prediction-review`：按完整市场 slug 查看预测时间轴、官方结算揭晓、模型/本地速度/同期市场概率对照和残差。
+- `#paper-research`：纸面策略、逐 outcome edge、盘口深度部分成交、持仓动作和纸面 PnL。结果只代表历史模拟。
+- `#diagnostics`：健康状态、来源错误、数据库锁、抓取缺口和数据完整性诊断。
+- `#backtest`：历史回放、概率评分、校准分桶、市场级汇总和 walk-forward 研究。
+- `#data-organization`：扫描可整理文件、生成不覆盖源文件的合并副本；删除操作只针对明确的完全重复低风险副本。
+- `#local-reports`：查看本地报告、审计清单和导出状态。
+
+## 启动与基本使用
+
+推荐使用本地启动控制台：
+
+```powershell
+Set-Location "C:\Users\宋思远\Desktop\K\AIPRP\co爬虫测试"
+powershell -ExecutionPolicy Bypass -File ".\start_dashboard_launcher.ps1"
+```
+
+然后打开 `http://127.0.0.1:8760/`，在控制台点击“打开研究台”，研究服务默认使用 `http://127.0.0.1:8765/`。后端或启动器代码更新后需要重启本地服务；仅静态页面更新时按 `Ctrl+F5` 刷新窗口。
+
+不使用启动控制台时，可直接启动研究服务：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ".\start_live_dashboard.ps1" `
+  -Db ".\data\extended.sqlite" `
+  -Model ".\data\extended_model_v4.json" `
+  -Proxy "http://127.0.0.1:7897"
+```
+
+常用离线检查：
+
+```powershell
+python -m unittest discover
+python .\audit_history_coverage.py --db .\data\extended.sqlite
+python .\data_file_organizer.py --help
+```
+
+历史抓取、新闻审核、回放和动态研究的完整参数以 `RUNBOOK-CH.md` 为准。未经明确要求，不要运行生产补采、模型重训或生产回放。
+
+## 数据与 GitHub 发布边界
+
+本仓库上传的是源码、测试、运行说明和审计文档。`data/`、`*.sqlite`、`*.db`、日志、Python 缓存、`.env`、`.ai-config.json` 和 `dist_dashboard_launcher/` 被 `.gitignore` 排除；本地数据库和一手采集文件不会随源码提交。构建 exe 可以由 `build_dashboard_launcher.ps1` 重新生成。
+
+上传前必须检查暂存清单，确认不包含数据库、CSV、密钥、日志或模型文件。不要使用强制推送，也不要通过 GitHub 上传本地生产数据库。
+
+## 安全边界
+
+历史数据只能使用当时可用的记录；检查点之后的数据不能进入过去的预测特征、评分或安全 edge。实时服务是 REST/RSS 轮询，不是 WebSocket。缺失、过期、无盘口、不可成交或无法核验结算时，页面应显示证据状态并保持纸面限制，不输出真实交易指令。
+
+---
+
 # Musk Polymarket Tracker
 
 Settlement-aligned data collector for Polymarket social-post count markets such as
@@ -316,3 +394,36 @@ python .\polymarket_pipeline.py hourly-test `
 - Date-only CLI bounds are interpreted in `America/New_York` by default and stored as UTC.
 - Raw tracker records are saved in `posts.raw_json` so parser logic can be corrected without losing source data.
 - If `stale` is true, treat the current count as unsafe for automated decisions.
+
+## Project Components
+
+- `musk_tracker.py`: XTracker client, post normalization, de-duplication, count samples, and the standalone polling CLI.
+- `polymarket_pipeline.py`: Gamma market metadata, XTracker posts, CLOB prices and order books, SQLite migrations, Ridge training, probability forecasts, purged walk-forward evaluation, and hourly replay.
+- `live_dashboard_server.py`: local HTTP service for REST/RSS polling, two isolated overlapping markets, predictions, paper forecasts/trades, approved events, news and stock context, and read-only archive APIs.
+- `forecast_dashboard.html`: static research UI for live markets, guessing/review mode, fixed local reports, residual charts, and AI settings. Settlement answers remain hidden until explicitly revealed.
+- `news_event_crawler.py`: whitelist-based RSS/Atom corpus collection, source audit records, and pending event candidates.
+- `ai_provider.py`: optional OpenAI-compatible structured analysis. It is a context assistant only and cannot change model probabilities, paper controls, or trading state.
+- `start_live_dashboard.ps1`: starts the local live service and can automatically select the latest Tuesday/Friday overlapping markets.
+- `run_hourly_replay.ps1`: generates hourly replay reports without overwriting existing outputs unless explicitly requested by the user.
+- `test_polymarket_pipeline.py`, `test_news_event_crawler.py`, `test_ai_provider.py`: regression tests for data, replay, source auditing, AI fallback, and service behavior.
+- `RUNBOOK-CH.md` and `MAINTENANCE-CH.md`: Chinese operating instructions and maintenance audit log.
+
+## Live Snapshot Archive
+
+Every live refresh appends a record to `live_market_snapshots` in the local SQLite database. A snapshot includes the cumulative post count, model forecast, outcome quotes and order-book summaries, news, stock context, approved events, source status and latency, errors, and the full structured response. Existing raw post records remain in `posts`; full raw CLOB order books remain in `market_orderbooks.raw_json`.
+
+The archive is read locally without triggering a new external request:
+
+```text
+http://127.0.0.1:8765/api/market-archive?slug=<market-slug>&limit=200
+```
+
+Older markets without new archive rows are normalized from `paper_forecasts.snapshot_json` and marked as `legacy_paper_forecast`. Missing historical news, order books, stock data, or flight context are represented by stable empty lists/status objects rather than missing fields. Flight data is currently not configured.
+
+## Replay Residual Charts
+
+After the private settlement report is explicitly loaded and the user clicks the reveal control, the dashboard shows both per-market residuals and the global market residual chart. The global chart uses the final replay checkpoint for each settled market, adds date and residual axes, and supports hover details for the full market slug, replay timestamp, local-observation residual, and official-bin-midpoint proxy residual. The midpoint is only a visualization proxy; it is not an exact official count.
+
+## Safety Boundary
+
+This repository is a local research and paper-forecast system. `do_not_auto_trade=true` is permanent. There are no wallet, signing, order-placement, automatic betting, or real-funds paths. Missing, stale, incomplete, or unverifiable data must result in a no-trade research state. Small historical samples, paper PnL, AI confidence, hit rates, and residual charts are not proof of profitability.

@@ -199,6 +199,8 @@ class NewsCorpusStore:
                 published_at_utc text,
                 retrieved_at_utc text not null,
                 available_at_utc text not null,
+                time_precision text not null default 'unknown',
+                time_quality text not null default 'unverified',
                 excerpt text not null,
                 content_hash text not null,
                 duplicate_cluster text not null,
@@ -212,6 +214,9 @@ class NewsCorpusStore:
                 version_id text primary key,
                 document_id text not null,
                 captured_at_utc text not null,
+                available_at_utc text,
+                time_precision text not null default 'unknown',
+                time_quality text not null default 'unverified',
                 content_hash text not null,
                 excerpt text not null,
                 raw_metadata_json text not null,
@@ -246,6 +251,9 @@ class NewsCorpusStore:
                 kind text not null,
                 direction text not null,
                 relevance_score real not null,
+                available_at_utc text,
+                time_precision text not null default 'unknown',
+                time_quality text not null default 'unverified',
                 extraction_method text not null,
                 status text not null,
                 decision_reason text not null,
@@ -257,8 +265,30 @@ class NewsCorpusStore:
             create index if not exists idx_source_documents_published on source_documents(published_at_utc);
             create index if not exists idx_source_documents_corpus on source_documents(corpus_eligible, published_at_utc);
             create index if not exists idx_event_candidates_document on event_candidates(document_id);
+            create index if not exists idx_source_documents_available on source_documents(available_at_utc);
+            create index if not exists idx_event_candidates_available on event_candidates(available_at_utc);
             """
         )
+        for table, columns in {
+            "source_documents": {
+                "time_precision": "text not null default 'unknown'",
+                "time_quality": "text not null default 'unverified'",
+            },
+            "document_versions": {
+                "available_at_utc": "text",
+                "time_precision": "text not null default 'unknown'",
+                "time_quality": "text not null default 'unverified'",
+            },
+            "event_candidates": {
+                "available_at_utc": "text",
+                "time_precision": "text not null default 'unknown'",
+                "time_quality": "text not null default 'unverified'",
+            },
+        }.items():
+            existing = {row[1] for row in self.conn.execute(f"pragma table_info({table})")}
+            for column, definition in columns.items():
+                if column not in existing:
+                    self.conn.execute(f"alter table {table} add column {column} {definition}")
         self.conn.commit()
 
     def close(self) -> None:
@@ -324,10 +354,10 @@ class NewsCorpusStore:
                 """insert into source_documents(
                     document_id, source_id, source_name, source_domain, source_tier,
                     source_reliability, url, normalized_url, title, published_at_utc,
-                    retrieved_at_utc, available_at_utc, excerpt, content_hash,
+                    retrieved_at_utc, available_at_utc, time_precision, time_quality, excerpt, content_hash,
                     duplicate_cluster, content_policy, corpus_eligible, status,
                     rejection_reason, raw_metadata_json
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(document_id) do update set
                     source_id=excluded.source_id, source_name=excluded.source_name,
                     source_domain=excluded.source_domain, source_tier=excluded.source_tier,
@@ -336,6 +366,7 @@ class NewsCorpusStore:
                     retrieved_at_utc=excluded.retrieved_at_utc,
                     available_at_utc=case when excluded.available_at_utc < source_documents.available_at_utc
                         then excluded.available_at_utc else source_documents.available_at_utc end,
+                    time_precision=excluded.time_precision, time_quality=excluded.time_quality,
                     excerpt=excluded.excerpt, content_hash=excluded.content_hash,
                     duplicate_cluster=excluded.duplicate_cluster, content_policy=excluded.content_policy,
                     corpus_eligible=excluded.corpus_eligible, status=excluded.status,
@@ -344,13 +375,19 @@ class NewsCorpusStore:
                 """,
                 (document_id, document["source_id"], document["source_name"], document["domain"], int(document["tier"]),
                  float(document["reliability"]), url, url, document["title"], published.isoformat() if published else None,
-                 retrieved.isoformat(), retrieved.isoformat(), document.get("excerpt", ""), document["content_hash"],
+                 retrieved.isoformat(), retrieved.isoformat(), "second" if published else "unknown",
+                 "source_timestamp" if published else "retrieval_only", document.get("excerpt", ""), document["content_hash"],
                  cluster, policy, eligible, status, reason, json_dumps(metadata)),
             )
             version_id = hashlib.sha256(f"{document_id}|{document['content_hash']}".encode()).hexdigest()[:40]
             self.conn.execute(
-                "insert or ignore into document_versions values (?, ?, ?, ?, ?, ?)",
-                (version_id, document_id, retrieved.isoformat(), document["content_hash"], document.get("excerpt", ""), json_dumps(metadata)),
+                """insert or ignore into document_versions(
+                    version_id, document_id, captured_at_utc, available_at_utc,
+                    time_precision, time_quality, content_hash, excerpt, raw_metadata_json
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (version_id, document_id, retrieved.isoformat(), retrieved.isoformat(),
+                 "second" if published else "unknown", "source_timestamp" if published else "retrieval_only",
+                 document["content_hash"], document.get("excerpt", ""), json_dumps(metadata)),
             )
         return document_id, bool(eligible and status == "accepted")
 
@@ -369,10 +406,14 @@ class NewsCorpusStore:
             self.conn.execute(
                 """insert or ignore into event_candidates(
                     candidate_id, document_id, candidate_key, kind, direction,
-                    relevance_score, extraction_method, status, decision_reason,
+                    relevance_score, available_at_utc, time_precision, time_quality,
+                    extraction_method, status, decision_reason,
                     summary, raw_json
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (candidate_id, document_id, candidate_key, kind, direction, relevance,
+                 document.get("available_at_utc") or document.get("retrieved_at_utc"),
+                 "second" if document.get("published_at_utc") else "unknown",
+                 "source_timestamp" if document.get("published_at_utc") else "retrieval_only",
                  "keyword_prefilter", "pending_review", "AI_or_human_review_required", summary, json_dumps({"topics": topics, "source": source.get("source_id")})),
             )
 

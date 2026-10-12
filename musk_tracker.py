@@ -190,8 +190,13 @@ class Store:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         # The live dashboard serves HTTP requests from worker threads; all
         # shared writes are serialized by the live service lock.
-        self.conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        # Several local dashboard instances may briefly overlap a write. Wait
+        # for the active transaction instead of failing immediately with a
+        # misleading capture error; callers still retain their own bounded
+        # retry/error evidence.
+        self.conn = sqlite3.connect(str(db_path), timeout=30, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("pragma busy_timeout=30000")
         self.migrate()
 
     def close(self) -> None:
@@ -206,6 +211,9 @@ class Store:
                 platform text not null,
                 created_at_utc text,
                 captured_at_utc text not null,
+                available_at_utc text,
+                time_precision text not null default 'unknown',
+                time_quality text not null default 'unverified',
                 post_type text,
                 text text,
                 raw_json text not null,
@@ -230,6 +238,19 @@ class Store:
                 on posts(user, platform, created_at_utc);
             """
         )
+        existing = {row[1] for row in self.conn.execute("pragma table_info(posts)")}
+        for column, definition in {
+            "available_at_utc": "text",
+            "time_precision": "text not null default 'unknown'",
+            "time_quality": "text not null default 'unverified'",
+        }.items():
+            if column not in existing:
+                self.conn.execute(f"alter table posts add column {column} {definition}")
+        # Existing databases need the column before this index can be created.
+        self.conn.execute(
+            "create index if not exists idx_posts_available "
+            "on posts(user, platform, available_at_utc)"
+        )
         self.conn.commit()
 
     def upsert_posts(self, posts: list[NormalizedPost]) -> int:
@@ -247,13 +268,20 @@ class Store:
                     """
                     insert into posts (
                         post_id, user, platform, created_at_utc, captured_at_utc,
+                        available_at_utc, time_precision, time_quality,
                         post_type, text, raw_json, first_seen_utc, last_seen_utc
-                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     on conflict(post_id) do update set
                         user = excluded.user,
                         platform = excluded.platform,
                         created_at_utc = excluded.created_at_utc,
                         captured_at_utc = excluded.captured_at_utc,
+                        available_at_utc = case
+                            when posts.available_at_utc is null then excluded.available_at_utc
+                            when excluded.available_at_utc < posts.available_at_utc then excluded.available_at_utc
+                            else posts.available_at_utc end,
+                        time_precision = excluded.time_precision,
+                        time_quality = excluded.time_quality,
                         post_type = excluded.post_type,
                         text = excluded.text,
                         raw_json = excluded.raw_json,
@@ -265,6 +293,9 @@ class Store:
                         post.platform,
                         post.created_at_utc.isoformat() if post.created_at_utc else None,
                         post.captured_at_utc.isoformat(),
+                        (post.created_at_utc or post.captured_at_utc).isoformat(),
+                        "second" if post.created_at_utc else "unknown",
+                        "source_timestamp" if post.created_at_utc else "capture_only",
                         post.post_type,
                         post.text,
                         json_dumps(post.raw),

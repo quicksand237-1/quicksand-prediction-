@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AIPRP 本地启动控制台</title>
+  <style>
+    body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;max-width:900px;margin:32px auto;padding:0 18px;background:#f5f7fb;color:#172033}
+    .panel{background:#fff;border:1px solid #dbe2ef;border-radius:14px;padding:22px;margin-bottom:18px;box-shadow:0 4px 18px #17203312}
+    h1{margin-top:0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}label{display:flex;flex-direction:column;gap:6px;font-size:14px}input,select{padding:9px;border:1px solid #c8d1e0;border-radius:8px;font:inherit}button{border:0;border-radius:8px;padding:10px 15px;margin:8px 8px 0 0;cursor:pointer;background:#2563eb;color:#fff}button.secondary{background:#64748b}button.danger{background:#b91c1c}.status{white-space:pre-wrap;background:#eef2ff;border-radius:8px;padding:12px;min-height:56px}.note{color:#52627a;font-size:13px;line-height:1.6}
+  </style>
+</head>
+<body>
+  <section class="panel">
+    <h1>AIPRP 本地启动控制台</h1>
+    <p class="note">控制台只管理本机启动的唯一研究台进程。前端不直接访问 Gamma、CLOB、XTracker 或 RSS；不会交易、下注或改变模型。端口、刷新间隔和请求超时在“启动研究台”时生效；修改后请先停止再重新启动。</p>
+    <div class="grid">
+      <label>启动模式<select id="mode"><option value="dynamic">自动发现当前两个市场</option><option value="backtest">本地回测/历史只读（不抓取）</option><option value="fixed">固定 slug（历史/指定市场）</option></select></label>
+      <label>固定 slug<input id="slug" placeholder="固定模式必填"></label>
+      <label>额外 slug（每行一个）<input id="extra_slugs" placeholder="可选"></label>
+      <label>数据库<input id="db" value="data\\extended.sqlite"></label>
+      <label>模型<input id="model" value="data\\extended_model_v4.json"></label>
+      <label>代理<input id="proxy" value="http://127.0.0.1:7897"></label>
+      <label>研究台端口<input id="port" type="number" value="8765" min="1024" max="65535"></label>
+      <label>刷新间隔（秒）<input id="refresh_seconds" type="number" value="300" min="300" max="86400"></label>
+      <label title="传递给后端外部 REST 请求的超时时间，不是浏览器等待时间">外部请求超时（秒）<input id="timeout" type="number" value="20" min="1" max="300"></label>
+      <label title="仅保存当前盘口、帖子计数和新闻的研究采样；不进入五分钟策略归档、模型或 edge">研究采样间隔（秒）<input id="research_refresh_seconds" type="number" value="30" min="30" max="86400"></label>
+    </div>
+    <p id="pending" class="note">表单是待启动参数，修改将在下一次启动时生效。</p>
+    <p id="project" class="note"></p>
+    <button id="start">启动研究台</button><button id="restart" class="secondary" disabled>重启后端服务</button><button id="stop" class="danger">停止本控制台启动的研究台</button><button id="open" class="secondary" disabled>打开研究台</button>
+  </section>
+  <section class="panel"><h2>状态</h2><div id="status" class="status">读取中…</div></section>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const payload = () => ({mode:$('mode').value,slug:$('slug').value.trim(),extra_slugs:$('extra_slugs').value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean),db:$('db').value.trim(),model:$('model').value.trim(),proxy:$('proxy').value.trim(),port:Number($('port').value),refresh_seconds:Number($('refresh_seconds').value),research_refresh_seconds:Number($('research_refresh_seconds').value),timeout:Number($('timeout').value)});
+    async function call(path, body={}) { const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),cache:'no-store'}); const j=await r.json(); if(!r.ok||j.ok===false) throw new Error(j.message||'请求失败'); return j; }
+    let initialized=false, edited=false, lastStatus=null, sequence=0, renderedSequence=0;
+    const fields=['mode','slug','extra_slugs','db','model','proxy','port','refresh_seconds','research_refresh_seconds','timeout'];
+    function pending(){
+      const config=lastStatus?.config;
+      const changed=config && Object.keys(config).length && fields.some(key=>JSON.stringify(payload()[key])!==JSON.stringify(config[key]));
+      $('pending').textContent=changed?'有未应用修改；下一次启动时生效，运行中配置保持不变。':'表单是待启动参数；下方显示上次启动配置，修改将在下一次启动时生效。';
+    }
+    fields.forEach(id=>{for(const event of ['input','change']) $(id).addEventListener(event,()=>{edited=true;pending();});});
+    function render(j){
+      if(!initialized){
+        if(!edited && j.config) for(const id of fields) if(j.config[id]!=null) $(id).value=id==='extra_slugs'?j.config[id].join('\n'):j.config[id];
+        initialized=true;
+      }
+      lastStatus=j;
+      const labels={not_started:'未启动',starting:'启动中（等待健康检查）',ready:'已就绪',stopped:'已停止',failed:'启动失败或进程退出'};
+      $('status').textContent=(labels[j.state]||'请重启控制台以加载新版状态接口')+'\n上次启动配置与日志：\n'+JSON.stringify(j,null,2);
+      $('project').textContent=j.project_root?`当前项目：${j.project_root}\n后端入口：${j.backend_entry}。启动的是该目录当前代码，不支持历史版本切换。`:'';
+      $('open').disabled=!j.dashboard_ready;
+      $('start').disabled=!!j.dashboard_running;
+      $('restart').disabled=!j.dashboard_running;
+      $('stop').disabled=!j.dashboard_running;
+      pending();
+    }
+    async function refresh(){ const ticket=++sequence; try{const j=await (await fetch('/api/status',{cache:'no-store'})).json();if(ticket>=renderedSequence){renderedSequence=ticket;render(j);}}catch(e){$('status').textContent='状态读取失败：'+e.message;$('open').disabled=true;} }
+    $('start').onclick=async()=>{for(const id of fields) if(!$(id).reportValidity())return;const ticket=++sequence;try{$('start').disabled=true;const j=await call('/api/start',payload());renderedSequence=Math.max(renderedSequence,ticket);render(j);}catch(e){alert(e.message);await refresh();}};
+    $('stop').onclick=async()=>{try{render(await call('/api/stop'));}catch(e){alert(e.message);}};
+    $('restart').onclick=async()=>{try{render(await call('/api/restart'));}catch(e){alert(e.message);await refresh();}};
+    $('open').onclick=async()=>{
+      // The launcher server cannot reliably open the user's browser window.
+      // Use the already health-checked URL in the click handler so popup
+      // permissions and the browser's user gesture are preserved.
+      const url=lastStatus?.dashboard_url;
+      if(url){
+        const opened=window.open(url,'_blank','noopener');
+        if(!opened) window.location.assign(url);
+        return;
+      }
+      try{render(await call('/api/open-dashboard'));}catch(e){alert(e.message);}
+    };
+    refresh(); setInterval(refresh,3000);
+  </script>
+</body>
+</html>

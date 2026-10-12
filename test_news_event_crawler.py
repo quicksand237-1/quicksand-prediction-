@@ -95,6 +95,22 @@ class NewsStoreTests(unittest.TestCase):
                 payload = json.loads(after.read_text(encoding="utf-8"))
                 self.assertEqual(payload["candidate_status"], "pending_review")
                 self.assertEqual(store.conn.execute("select count(*) from source_registry where source_id='test_source'").fetchone()[0], 1)
+                document_time = store.conn.execute(
+                    "select available_at_utc, time_precision, time_quality from source_documents where document_id=?",
+                    (document_id,),
+                ).fetchone()
+                version_time = store.conn.execute(
+                    "select available_at_utc, time_precision, time_quality from document_versions where document_id=?",
+                    (document_id,),
+                ).fetchone()
+                candidate_time = store.conn.execute(
+                    "select available_at_utc, time_precision, time_quality from event_candidates where document_id=?",
+                    (document_id,),
+                ).fetchone()
+                self.assertEqual(document_time[1:], ("second", "source_timestamp"))
+                self.assertEqual(version_time[1:], ("second", "source_timestamp"))
+                self.assertEqual(candidate_time[1:], ("second", "source_timestamp"))
+                self.assertEqual(document_time[0], "2026-08-12T11:00:00+00:00")
             finally:
                 store.close()
 

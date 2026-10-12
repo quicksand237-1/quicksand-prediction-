@@ -8,3 +8,5 @@ __pycache__/
 .env
 .env.*
 .ai-config.json
+build_dashboard_launcher/
+dist_dashboard_launcher/

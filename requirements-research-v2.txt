@@ -1,0 +1,2 @@
+# Optional experimental probability layer; does not change the legacy runtime.
+scipy==1.17.0

@@ -20,12 +20,15 @@ import argparse
 import csv
 import concurrent.futures
 import datetime as dt
+import http.client
 import hashlib
+import email.utils
 import json
 import math
 import re
 import sqlite3
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -35,6 +38,7 @@ from pathlib import Path
 from statistics import mean
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
+from history_acquisition import price_known_by
 
 from musk_tracker import (
     DEFAULT_PLATFORM,
@@ -55,6 +59,7 @@ MODEL_NAME = "standardized_ridge_count_v5_event_gated"
 DEFAULT_GAMMA_URL = "https://gamma-api.polymarket.com"
 DEFAULT_CLOB_URL = "https://clob.polymarket.com"
 DEFAULT_PROXY = None
+ELON_TWEETS_SERIES_ID = "10000"
 DEFAULT_ANCHOR = "2026-02-10T12:00:00"
 MARKET_GAPS_DAYS = (3, 4)
 WINDOW_DAYS = 7
@@ -114,6 +119,23 @@ def parse_json(value: Any, default: Any) -> Any:
     return value if value is not None else default
 
 
+def extract_records(payload: Any, preferred_keys: Iterable[str] = ()) -> list[dict[str, Any]]:
+    """Normalize list/data/items envelopes returned by public APIs."""
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in (*preferred_keys, "data", "result", "results", "items"):
+        nested = payload.get(key)
+        if isinstance(nested, list):
+            return [item for item in nested if isinstance(item, dict)]
+        if isinstance(nested, dict):
+            records = extract_records(nested, preferred_keys)
+            if records:
+                return records
+    return []
+
+
 def clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
 
@@ -123,6 +145,31 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def parse_float(value: Any) -> float | None:
+    """Parse an optional numeric value without turning missing data into zero."""
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_bool(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(bool(value))
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "y", "on"}:
+        return 1
+    if text in {"false", "0", "no", "n", "off"}:
+        return 0
+    return None
 
 
 def normalize_event_kind(value: Any) -> str:
@@ -214,12 +261,56 @@ class JsonClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.retries = max(1, retries)
+        self.request_delay = 0.0
+        self._request_lock = threading.Lock()
+        self._next_request_at = 0.0
         handlers: list[Any] = []
         if proxy:
             handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
         else:
             handlers.append(urllib.request.ProxyHandler())
         self.opener = urllib.request.build_opener(*handlers)
+
+    def _open_request(self, request: urllib.request.Request) -> Any:
+        # All workers, pages and retries on this client share the same gate.
+        with self._request_lock:
+            remaining = self._next_request_at - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining)
+            self._next_request_at = time.monotonic() + self.request_delay
+            try:
+                return self.opener.open(request, timeout=self.timeout)
+            except urllib.error.HTTPError as exc:
+                self._record_http_error(exc)
+                raise
+
+    def _record_http_error(self, exc: urllib.error.HTTPError) -> None:
+        headers = exc.headers or {}
+        exc.trace_id = headers.get('x-trace-id')
+        exc.retry_after_seconds = None
+        retry_after = headers.get('Retry-After')
+        if retry_after:
+            try:
+                delay = float(retry_after)
+            except ValueError:
+                try:
+                    delay = (email.utils.parsedate_to_datetime(retry_after) - utc_now()).total_seconds()
+                except (ValueError, TypeError, OverflowError):
+                    delay = 0.0
+            if math.isfinite(delay):
+                exc.retry_after_seconds = max(0.0, delay)
+                if exc.code in {429, 503}:
+                    self._next_request_at = max(self._next_request_at, time.monotonic() + max(0.0, delay))
+        try:
+            payload = json.loads(exc.read(8192).decode('utf-8'))
+            if isinstance(payload, dict):
+                exc.api_error_code = payload.get('code')
+                exc.api_retryable = payload.get('retryable')
+                exc.trace_id = payload.get('trace_id') or exc.trace_id
+        except (ValueError, OSError, AttributeError):
+            pass
+        finally:
+            exc.close()
 
     def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         query = urllib.parse.urlencode({key: value for key, value in (params or {}).items() if value is not None})
@@ -236,14 +327,46 @@ class JsonClient:
         last_error: Exception | None = None
         for attempt in range(self.retries):
             try:
-                with self.opener.open(request, timeout=self.timeout) as response:
+                with self._open_request(request) as response:
                     charset = response.headers.get_content_charset() or "utf-8"
                     return json.loads(response.read().decode(charset))
             except urllib.error.HTTPError as exc:
                 last_error = exc
-                if exc.code not in {408, 425, 429, 500, 502, 503, 504} or attempt + 1 >= self.retries:
+                if (exc.code not in {408, 425, 429, 500, 502, 503, 504}
+                        or getattr(exc, 'api_retryable', None) is False or attempt + 1 >= self.retries):
                     raise
-            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            except (urllib.error.URLError, TimeoutError, OSError, http.client.IncompleteRead, http.client.RemoteDisconnected) as exc:
+                last_error = exc
+                if attempt + 1 >= self.retries:
+                    raise
+            time.sleep(min(2.0, 0.25 * (2**attempt)))
+        raise RuntimeError(f"HTTP request failed: {last_error}")
+
+    def post_json(self, path: str, payload: Any) -> Any:
+        """POST JSON for documented public batch endpoints."""
+        url = f"{self.base_url}{path}"
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload, ensure_ascii=True).encode("utf-8"),
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "User-Agent": "musk-market-pipeline/0.3",
+            },
+            method="POST",
+        )
+        last_error: Exception | None = None
+        for attempt in range(self.retries):
+            try:
+                with self._open_request(request) as response:
+                    charset = response.headers.get_content_charset() or "utf-8"
+                    return json.loads(response.read().decode(charset))
+            except urllib.error.HTTPError as exc:
+                last_error = exc
+                if (exc.code not in {408, 425, 429, 500, 502, 503, 504}
+                        or getattr(exc, 'api_retryable', None) is False or attempt + 1 >= self.retries):
+                    raise
+            except (urllib.error.URLError, TimeoutError, OSError, http.client.IncompleteRead, http.client.RemoteDisconnected) as exc:
                 last_error = exc
                 if attempt + 1 >= self.retries:
                     raise
@@ -258,8 +381,67 @@ class GammaClient(JsonClient):
             raise ValueError(f"Gamma returned non-object for {slug}")
         return payload
 
+    def list_events(self, *, limit: int = 100, offset: int = 0, closed: bool | None = None) -> list[dict[str, Any]]:
+        payload = self.get("/events", {"limit": limit, "offset": offset, "closed": closed})
+        return extract_records(payload, ("events", "data", "items", "results"))
+
+    def discover_count_events(
+        self,
+        start_utc: dt.datetime,
+        end_utc: dt.datetime,
+        timezone: str,
+        *,
+        max_pages: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Find real Elon count events before falling back to generated slugs."""
+        found: dict[str, dict[str, Any]] = {}
+        # Query the dedicated recurring series instead of scanning all markets.
+        def load_page(page: int, series: bool) -> list[dict[str, Any]]:
+            params = {"limit": 100, "offset": page * 100, "closed": None,
+                      "order": "endDate", "ascending": False}
+            if series:
+                params["series_id"] = ELON_TWEETS_SERIES_ID
+            payload = self.get("/events", params)
+            return extract_records(payload, ("events", "data", "items", "results"))
+        use_series = True
+        for page in range(max(1, min(max_pages, 20))):
+            try:
+                rows = load_page(page, use_series)
+            except urllib.error.HTTPError as exc:
+                if page != 0 or exc.code not in {400, 404, 422}:
+                    raise
+                use_series = False
+                rows = load_page(page, use_series)
+            # Some Gamma deployments ignore or reject series_id. Retry the
+            # same bounded page against the general event listing and filter
+            # locally instead of manufacturing date-based slugs.
+            if page == 0 and not rows:
+                use_series = False
+                rows = load_page(page, use_series)
+            if not rows:
+                break
+            for event in rows:
+                identity = " ".join(str(event.get(key) or "") for key in ("title", "question", "slug")).lower()
+                if "elon" not in identity or not any(word in identity for word in ("tweet", "post", "发帖")):
+                    continue
+                window = event_window(event, timezone)
+                if window[0] is None or window[1] is None or window[1] <= start_utc or window[0] >= end_utc:
+                    continue
+                slug = str(event.get("slug") or event.get("ticker") or "").strip()
+                if slug:
+                    found[slug] = event
+            if len(rows) < 100:
+                break
+        return list(found.values())
+
 
 class ClobClient(JsonClient):
+    def get_history_window(self, token_id: str, start: dt.datetime, end: dt.datetime, fidelity: int = 5,
+                           *, known_history=(), checked=()) -> dict[str, Any]:
+        from history_prices import fetch_history
+        return fetch_history(self.get, token_id, start, end, fidelity, parse_timestamp, parse_float,
+                             known_history, checked)
+
     def get_history(self, token_id: str, interval: str, fidelity: int) -> list[dict[str, Any]]:
         payload = self.get(
             "/prices-history",
@@ -273,6 +455,79 @@ class ClobClient(JsonClient):
         if not isinstance(payload, dict):
             raise ValueError(f"CLOB returned non-object order book for {token_id}")
         return payload
+
+    def get_orderbooks(self, token_ids: list[str]) -> dict[str, dict[str, Any]]:
+        if not token_ids:
+            return {}
+        payload = self.post_json("/books", [{"token_id": token_id} for token_id in token_ids])
+        rows = extract_records(payload, ("books", "data", "items"))
+        result: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            token_id = row.get("asset_id") or row.get("token_id") or row.get("market")
+            if token_id is not None:
+                result[str(token_id)] = row
+        return result
+
+    def get_prices(self, token_ids: list[str]) -> dict[str, dict[str, Any]]:
+        if not token_ids:
+            return {}
+        payload = self.post_json(
+            "/prices",
+            [{"token_id": token_id, "side": side} for token_id in token_ids for side in ("BUY", "SELL")],
+        )
+        if isinstance(payload, dict) and isinstance(payload.get("prices"), dict):
+            return {
+                str(token_id): value if isinstance(value, dict) else {"price": value}
+                for token_id, value in payload["prices"].items()
+            }
+        if isinstance(payload, dict) and any(str(token) in payload for token in token_ids):
+            return {str(token): payload[str(token)] if isinstance(payload[str(token)], dict) else {"price": payload[str(token)]}
+                    for token in token_ids if str(token) in payload}
+        rows = extract_records(payload, ("prices", "data", "items"))
+        result: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            token_id = row.get("token_id") or row.get("asset_id") or row.get("market")
+            if token_id is not None:
+                result.setdefault(str(token_id), {}).update(row)
+        return result
+
+
+class PublicDataClient(JsonClient):
+    def get_history_window(self, token_id, start, end, fidelity=5, *, known_history=(), checked=()):
+        from history_prices import fetch_history
+        return fetch_history(self.get, token_id, start, end, fidelity, parse_timestamp, parse_float,
+                             known_history, checked, api='v2')
+
+    """Public Data API reader; no account credentials or signing are used."""
+
+    def get_trades(self, market_id: str, *, limit: int = 500) -> list[dict[str, Any]]:
+        if not re.fullmatch(r'0x[0-9a-fA-F]{64}', market_id):
+            raise ValueError('公共成交需要链上condition ID，不能使用Gamma market ID')
+        if not 1 <= limit <= 1000:
+            raise ValueError('v2公共成交每页limit必须为1至1000')
+        params = {'condition': market_id, 'limit': limit, 'taker_only': 'true',
+                  'filter_type': 'TOKENS', 'filter_amount': 0.01}
+        rows, seen = [], set()
+        for _ in range(1000):
+            payload = self.get('/v2/trades', params)
+            if not isinstance(payload, dict) or not isinstance(payload.get('data'), list):
+                raise ValueError('公共成交响应缺少data数组')
+            if any(not isinstance(row, dict) for row in payload['data']):
+                raise ValueError('公共成交响应包含无效记录')
+            rows.extend(payload['data'])
+            pagination = payload.get('pagination')
+            if not isinstance(pagination, dict) or not isinstance(pagination.get('has_more'), bool):
+                raise ValueError('公共成交响应缺少完整分页状态')
+            cursor = pagination.get('next_cursor')
+            if 'next_cursor' not in pagination or (not pagination['has_more'] and cursor is not None):
+                raise ValueError('公共成交分页状态不一致')
+            if not pagination['has_more']:
+                return rows
+            if not isinstance(cursor, str) or not cursor or cursor in seen:
+                raise ValueError('公共成交分页缺少或重复游标')
+            seen.add(cursor)
+            params = {**params, 'cursor': cursor}
+        raise ValueError('公共成交超过1000页安全上限，未完成')
 
 
 def parse_range(label: str | None) -> tuple[int | None, int | None]:
@@ -291,12 +546,16 @@ def parse_range(label: str | None) -> tuple[int | None, int | None]:
 
 def parse_timestamp(value: Any, timezone: str = DEFAULT_TZ) -> dt.datetime | None:
     try:
+        if isinstance(value, str) and re.fullmatch(r"[+-]?\d+(?:\.\d+)?", value.strip()):
+            value = float(value.strip())
         if isinstance(value, (int, float)):
+            if not math.isfinite(value):
+                return None
             if value > 10_000_000_000:
                 value /= 1000
             return dt.datetime.fromtimestamp(value, tz=dt.timezone.utc)
         return parse_datetime(str(value), timezone)
-    except (TypeError, ValueError, OverflowError):
+    except (TypeError, ValueError, OverflowError, OSError):
         return None
 
 
@@ -328,22 +587,27 @@ def parse_count_market_window(description: str | None, timezone: str = DEFAULT_T
 
 
 def event_window(event: dict[str, Any], timezone: str) -> tuple[dt.datetime | None, dt.datetime | None]:
-    """Prefer explicit settlement rules over an event's listing/creation date."""
-    from_description = parse_count_market_window(str(event.get("description") or ""), timezone)
-    if from_description is not None:
-        return from_description
+    """Resolve the trading window from structured Gamma fields first.
 
+    Gamma descriptions are useful for legacy records, but they are mutable text
+    and may contain an old rule/date.  Structured event/market timestamps are the
+    authoritative identity for live selection; description parsing is fallback
+    only when those fields are incomplete.
+    """
     market_starts = [
         parsed
         for market in event.get("markets", [])
         if isinstance(market, dict)
         if (parsed := parse_timestamp(market.get("gameStartTime"), timezone)) is not None
     ]
-    start = min(market_starts) if market_starts else parse_timestamp(
-        event.get("gameStartTime") or event.get("startDate"), timezone
-    )
+    explicit_start = min(market_starts) if market_starts else parse_timestamp(event.get("gameStartTime"), timezone)
     end = parse_timestamp(event.get("endDate"), timezone)
-    return start, end
+    if explicit_start is not None and end is not None and end > explicit_start:
+        return explicit_start, end
+    from_description = parse_count_market_window(str(event.get("description") or ""), timezone)
+    if from_description is not None:
+        return from_description
+    return explicit_start or parse_timestamp(event.get("startDate"), timezone), end
 
 
 @dataclass(frozen=True)
@@ -362,6 +626,14 @@ class Example:
     current_count: int
 
 
+@dataclass(frozen=True)
+class PostObservation:
+    """A post's event time and the first local time it was available."""
+
+    created_at_utc: dt.datetime
+    available_at_utc: dt.datetime | None
+
+
 class MarketStore(PostStore):
     def migrate(self) -> None:
         super().migrate()
@@ -375,6 +647,17 @@ class MarketStore(PostStore):
                 start_date_utc text,
                 end_date_utc text,
                 game_start_utc text,
+                close_date_utc text,
+                resolution_date_utc text,
+                active integer,
+                closed integer,
+                accepting_orders integer,
+                liquidity real,
+                volume real,
+                open_interest real,
+                tags_json text not null default '[]',
+                series_json text not null default '{}',
+                status_json text not null default '{}',
                 fetched_at_utc text not null,
                 raw_json text not null
             );
@@ -387,6 +670,8 @@ class MarketStore(PostStore):
                 upper_count integer,
                 yes_token_id text,
                 no_token_id text,
+                outcome_index integer,
+                token_ids_json text not null default '[]',
                 resolved_yes integer,
                 raw_json text not null,
                 primary key (event_slug, market_id)
@@ -402,6 +687,23 @@ class MarketStore(PostStore):
                 primary key (event_slug, market_id, token_id, price_time_utc)
             );
 
+            create table if not exists history_price_checks (
+                event_slug text not null, market_id text not null, token_id text not null,
+                source_url text not null, start_utc text not null, end_utc text not null,
+                fidelity integer not null, checked_at_utc text not null,
+                primary key (event_slug, market_id, token_id, source_url, start_utc, end_utc, fidelity)
+            );
+
+            create table if not exists history_price_attempts (
+                id integer primary key autoincrement,
+                event_slug text not null, market_id text not null, token_id text not null,
+                source_url text not null, start_utc text not null, end_utc text not null,
+                target_seconds integer not null, finished_at_utc text not null,
+                status text not null, evidence_json text not null
+            );
+            create index if not exists idx_history_price_attempts_event
+                on history_price_attempts(event_slug, market_id, token_id, start_utc);
+
             create table if not exists market_orderbooks (
                 event_slug text not null,
                 market_id text not null,
@@ -413,6 +715,9 @@ class MarketStore(PostStore):
                 spread real,
                 bid_depth_5 real,
                 ask_depth_5 real,
+                depth_imbalance real,
+                last_trade_price real,
+                last_trade_side text,
                 raw_json text not null,
                 primary key (event_slug, market_id, token_id, captured_at_utc)
             );
@@ -420,6 +725,11 @@ class MarketStore(PostStore):
             create table if not exists external_events (
                 event_key text primary key,
                 occurred_at_utc text not null,
+                available_at_utc text,
+                observed_at_utc text,
+                time_precision text not null default 'unknown',
+                time_quality text not null default 'unverified',
+                source_kind text not null default 'unspecified',
                 kind text not null,
                 impact real not null default 1,
                 keywords text,
@@ -523,6 +833,79 @@ class MarketStore(PostStore):
                 snapshot_json text not null
             );
 
+            create table if not exists live_market_snapshots (
+                id integer primary key autoincrement,
+                captured_at_utc text not null,
+                event_slug text not null,
+                window_start_utc text,
+                window_end_utc text,
+                refresh_status text not null,
+                current_count integer not null default 0,
+                posts_returned integer not null default 0,
+                tracker_refresh_age_seconds integer,
+                latest_post_capture_age_seconds integer,
+                model_forecast_final_count real,
+                market_expected_count real,
+                market_probability_mass real,
+                market_distribution_valid integer not null default 0,
+                source_status_json text not null,
+                external_context_json text not null,
+                errors_json text not null,
+                snapshot_json text not null
+            );
+
+            create table if not exists research_market_snapshots (
+                id integer primary key autoincrement,
+                event_slug text not null,
+                captured_at_utc text not null,
+                bucket_start_utc text,
+                target_interval_seconds integer not null,
+                capture_status text not null,
+                current_count integer,
+                posts_returned integer not null default 0,
+                tracker_refresh_age_seconds integer,
+                source_status_json text not null,
+                errors_json text not null,
+                snapshot_json text not null
+            );
+
+            create table if not exists market_trades (
+                event_slug text not null,
+                market_id text,
+                token_id text,
+                trade_id text not null,
+                trade_time_utc text,
+                price real,
+                size real,
+                side text,
+                source_timestamp_utc text,
+                captured_at_utc text not null,
+                raw_json text not null,
+                primary key (event_slug, trade_id)
+            );
+
+            create table if not exists market_activity_snapshots (
+                id integer primary key autoincrement,
+                event_slug text not null,
+                captured_at_utc text not null,
+                data_time_utc text,
+                volume_24h real,
+                open_interest real,
+                liquidity real,
+                trade_count integer,
+                raw_json text not null
+            );
+
+            create table if not exists prediction_archive (
+                id integer primary key autoincrement,
+                event_slug text not null,
+                data_time_utc text,
+                captured_at_utc text not null,
+                refresh_status text not null,
+                schema_version text not null,
+                payload_json text not null
+            );
+
             create index if not exists idx_market_prices_lookup
                 on market_prices(event_slug, price_time_utc);
             create index if not exists idx_external_events_time
@@ -535,8 +918,42 @@ class MarketStore(PostStore):
                 on paper_forecasts(event_slug, captured_at_utc);
             create index if not exists idx_paper_trades_event_time
                 on paper_trades(event_slug, created_at_utc);
+            create index if not exists idx_live_market_snapshots_event_time
+                on live_market_snapshots(event_slug, captured_at_utc);
+            create index if not exists idx_research_market_snapshots_event_time
+                on research_market_snapshots(event_slug, captured_at_utc);
+            create index if not exists idx_market_trades_event_time
+                on market_trades(event_slug, trade_time_utc);
+            create index if not exists idx_market_activity_event_time
+                on market_activity_snapshots(event_slug, captured_at_utc);
+            create index if not exists idx_prediction_archive_event_time
+                on prediction_archive(event_slug, captured_at_utc);
             """
         )
+        for table, columns in {
+            "market_events": {
+                "close_date_utc": "text", "resolution_date_utc": "text",
+                "active": "integer", "closed": "integer", "accepting_orders": "integer",
+                "liquidity": "real", "volume": "real", "open_interest": "real",
+                "tags_json": "text not null default '[]'", "series_json": "text not null default '{}'",
+                "status_json": "text not null default '{}'",
+            },
+            "market_outcomes": {"outcome_index": "integer", "token_ids_json": "text not null default '[]'"},
+            "market_prices": {"resolution_seconds": "integer", "source": "text"},
+            "market_orderbooks": {
+                "depth_imbalance": "real", "last_trade_price": "real", "last_trade_side": "text",
+            },
+            "external_events": {
+                "available_at_utc": "text", "observed_at_utc": "text",
+                "time_precision": "text not null default 'unknown'",
+                "time_quality": "text not null default 'unverified'",
+                "source_kind": "text not null default 'unspecified'",
+            },
+        }.items():
+            existing = {row[1] for row in self.conn.execute(f"pragma table_info({table})")}
+            for column, definition in columns.items():
+                if column not in existing:
+                    self.conn.execute(f"alter table {table} add column {column} {definition}")
         self.conn.executemany(
             """
             insert or ignore into source_registry (
@@ -570,12 +987,18 @@ class MarketStore(PostStore):
                 """
                 insert into market_events (
                     slug, event_id, title, description, start_date_utc, end_date_utc,
-                    game_start_utc, fetched_at_utc, raw_json
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    game_start_utc, close_date_utc, resolution_date_utc, active, closed,
+                    accepting_orders, liquidity, volume, open_interest, tags_json,
+                    series_json, status_json, fetched_at_utc, raw_json
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(slug) do update set
                     event_id=excluded.event_id, title=excluded.title,
                     description=excluded.description, start_date_utc=excluded.start_date_utc,
                     end_date_utc=excluded.end_date_utc, game_start_utc=excluded.game_start_utc,
+                    close_date_utc=excluded.close_date_utc, resolution_date_utc=excluded.resolution_date_utc,
+                    active=excluded.active, closed=excluded.closed, accepting_orders=excluded.accepting_orders,
+                    liquidity=excluded.liquidity, volume=excluded.volume, open_interest=excluded.open_interest,
+                    tags_json=excluded.tags_json, series_json=excluded.series_json, status_json=excluded.status_json,
                     fetched_at_utc=excluded.fetched_at_utc, raw_json=excluded.raw_json
                 """,
                 (
@@ -587,28 +1010,46 @@ class MarketStore(PostStore):
                     if parse_timestamp(event.get("startDate"), timezone) else None,
                     end.isoformat(),
                     start.isoformat(),
+                    parse_timestamp(event.get("closeDate"), timezone).isoformat()
+                    if parse_timestamp(event.get("closeDate"), timezone) else None,
+                    parse_timestamp(event.get("resolutionDate") or event.get("resolvedAt"), timezone).isoformat()
+                    if parse_timestamp(event.get("resolutionDate") or event.get("resolvedAt"), timezone) else None,
+                    parse_bool(event.get("active")),
+                    parse_bool(event.get("closed")),
+                    parse_bool(event.get("acceptingOrders")),
+                    parse_float(event.get("liquidity")), parse_float(event.get("volume")),
+                    parse_float(event.get("openInterest")),
+                    json_dumps(event.get("tags") if isinstance(event.get("tags"), list) else []),
+                    json_dumps(event.get("series") if isinstance(event.get("series"), (dict, list)) else {}),
+                    json_dumps({key: event.get(key) for key in ("active", "closed", "acceptingOrders", "resolved") if key in event}),
                     utc_now().isoformat(),
                     json_dumps(event),
                 ),
             )
             self.conn.execute("delete from market_outcomes where event_slug = ?", (slug,))
-            for market in event.get("markets", []):
+            for outcome_index, market in enumerate(event.get("markets", [])):
                 if not isinstance(market, dict):
                     continue
                 labels = parse_range(str(market.get("groupItemTitle") or ""))
                 tokens = parse_json(market.get("clobTokenIds"), [])
                 prices = parse_json(market.get("outcomePrices"), [])
+                names = parse_json(market.get("outcomes"), [])
                 if not isinstance(tokens, list):
                     tokens = []
+                names = [str(name).strip().lower() for name in names] if isinstance(names, list) else []
+                yes_index = names.index("yes") if "yes" in names else (0 if not names else None)
+                no_index = names.index("no") if "no" in names else (1 if not names else None)
                 resolved_yes: int | None = None
-                if len(prices) >= 2 and str(prices[0]) in {"0", "1"} and str(prices[1]) in {"0", "1"}:
-                    resolved_yes = int(float(prices[0]) > float(prices[1]))
+                if yes_index is not None and no_index is not None and len(prices) > max(yes_index, no_index):
+                    yes_price, no_price = parse_float(prices[yes_index]), parse_float(prices[no_index])
+                    if yes_price in (0, 1) and no_price in (0, 1) and yes_price != no_price:
+                        resolved_yes = int(yes_price > no_price)
                 self.conn.execute(
                     """
                     insert into market_outcomes (
                         event_slug, market_id, label, lower_count, upper_count,
-                        yes_token_id, no_token_id, resolved_yes, raw_json
-                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        yes_token_id, no_token_id, outcome_index, token_ids_json, resolved_yes, raw_json
+                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         slug,
@@ -616,8 +1057,10 @@ class MarketStore(PostStore):
                         str(market.get("groupItemTitle") or ""),
                         labels[0],
                         labels[1],
-                        str(tokens[0]) if len(tokens) > 0 else None,
-                        str(tokens[1]) if len(tokens) > 1 else None,
+                        str(tokens[yes_index]) if yes_index is not None and len(tokens) > yes_index else None,
+                        str(tokens[no_index]) if no_index is not None and len(tokens) > no_index else None,
+                        outcome_index,
+                        json_dumps(tokens),
                         resolved_yes,
                         json_dumps(market),
                     ),
@@ -627,28 +1070,30 @@ class MarketStore(PostStore):
     def save_prices(self, slug: str, market_id: str, token_id: str, history: list[dict[str, Any]]) -> int:
         inserted = 0
         captured = utc_now().isoformat()
-        with self.conn:
-            for row in history:
-                timestamp = parse_timestamp(row.get("t"))
-                price = row.get("p")
-                if timestamp is None or price is None:
-                    continue
-                try:
-                    numeric_price = float(price)
-                except (TypeError, ValueError):
-                    continue
-                if not 0 <= numeric_price <= 1:
-                    continue
-                cursor = self.conn.execute(
-                    """
-                    insert or ignore into market_prices (
-                        event_slug, market_id, token_id, price_time_utc, price, captured_at_utc
-                    ) values (?, ?, ?, ?, ?, ?)
-                    """,
-                    (slug, market_id, token_id, timestamp.isoformat(), numeric_price, captured),
-                )
+        rows = []
+        # Parse outside the write transaction; commit small batches so readers can proceed.
+        for row in history:
+            timestamp = parse_timestamp(row.get("t", row.get("timestamp")))
+            numeric_price = parse_float(row.get("p", row.get("price")))
+            if timestamp is not None and numeric_price is not None and 0 <= numeric_price <= 1:
+                rows.append((slug, market_id, token_id, timestamp.isoformat(), numeric_price, captured,
+                             row.get('resolution_seconds'), row.get('source')))
+        for offset in range(0, len(rows), 500):
+            with self.conn:
+                cursor = self.conn.executemany(
+                    "insert or ignore into market_prices (event_slug, market_id, token_id, price_time_utc, price, captured_at_utc, resolution_seconds, source) values (?, ?, ?, ?, ?, ?, ?, ?)",
+                    rows[offset:offset+500])
                 inserted += cursor.rowcount
         return inserted
+
+    def save_history_attempts(self, slug, market_id, token_id, source_url, attempts):
+        with self.conn:
+            self.conn.executemany(
+                'insert into history_price_attempts '
+                '(event_slug,market_id,token_id,source_url,start_utc,end_utc,target_seconds,'
+                'finished_at_utc,status,evidence_json) values (?,?,?,?,?,?,?,?,?,?)',
+                [(slug, market_id, token_id, source_url, r['start'], r['end'], r['target_seconds'],
+                  r['finished_at_utc'], r['status'], json_dumps(r)) for r in attempts])
 
     def save_orderbook(
         self,
@@ -667,10 +1112,13 @@ class MarketStore(PostStore):
                     size = float(row.get("size"))
                 except (TypeError, ValueError):
                     continue
-                if 0 <= price <= 1 and size >= 0:
+                if math.isfinite(price) and math.isfinite(size) and 0 <= price <= 1 and size > 0:
                     result.append((price, size))
             return result
 
+        actual_token = book.get("asset_id") or book.get("token_id")
+        if actual_token is not None and str(actual_token) != str(token_id):
+            raise ValueError("orderbook token does not match requested token")
         bids = levels("bids")
         asks = levels("asks")
         best_bid = max((price for price, _ in bids), default=None)
@@ -678,6 +1126,10 @@ class MarketStore(PostStore):
         spread = best_ask - best_bid if best_bid is not None and best_ask is not None else None
         bid_depth = sum(size for price, size in bids if best_bid is not None and price >= best_bid - 0.05)
         ask_depth = sum(size for price, size in asks if best_ask is not None and price <= best_ask + 0.05)
+        depth_imbalance = (
+            (bid_depth - ask_depth) / (bid_depth + ask_depth)
+            if bid_depth + ask_depth > 0 else None
+        )
         source_time = parse_timestamp(book.get("timestamp"))
         captured = utc_now().isoformat()
         with self.conn:
@@ -686,8 +1138,9 @@ class MarketStore(PostStore):
                 insert or ignore into market_orderbooks (
                     event_slug, market_id, token_id, captured_at_utc,
                     source_timestamp_utc, best_bid, best_ask, spread,
-                    bid_depth_5, ask_depth_5, raw_json
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    bid_depth_5, ask_depth_5, depth_imbalance,
+                    last_trade_price, last_trade_side, raw_json
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     slug,
@@ -700,10 +1153,398 @@ class MarketStore(PostStore):
                     spread,
                     bid_depth,
                     ask_depth,
+                    depth_imbalance,
+                    parse_float(book.get("last_trade_price") or book.get("lastTradePrice")),
+                    str(book.get("last_trade_side") or book.get("lastTradeSide") or "").upper() or None,
                     json_dumps(book),
                 ),
             )
         return cursor.rowcount
+
+    def save_market_trades(
+        self,
+        event_slug: str,
+        market_id: str,
+        rows: list[dict[str, Any]],
+        captured_at_utc: dt.datetime | None = None,
+    ) -> int:
+        captured = (captured_at_utc or utc_now()).isoformat()
+        inserted = 0
+        with self.conn:
+            for index, row in enumerate(rows):
+                trade_id = str(row.get("id") or row.get("trade_id") or "").strip()
+                if not trade_id:
+                    identity = {key: row.get(key) for key in (
+                        "transaction_hash", "transactionHash", "condition_id", "token_id", "asset",
+                        "timestamp", "price", "size", "side", "outcome_index", "log_index", "sequence_id")}
+                    trade_id = "fill:" + hashlib.sha256(json_dumps(identity).encode("utf-8")).hexdigest()
+                trade_time = parse_timestamp(row.get("timestamp") or row.get("match_time") or row.get("created_at"))
+                token_id = row.get("asset_id") or row.get("token_id") or row.get("asset")
+                cursor = self.conn.execute(
+                    """
+                    insert or ignore into market_trades (
+                        event_slug, market_id, token_id, trade_id, trade_time_utc,
+                        price, size, side, source_timestamp_utc, captured_at_utc, raw_json
+                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event_slug, market_id, str(token_id) if token_id is not None else None,
+                        trade_id, trade_time.isoformat() if trade_time else None,
+                        parse_float(row.get("price")), parse_float(row.get("size") or row.get("amount")),
+                        str(row.get("side") or row.get("taker_side") or "").upper() or None,
+                        trade_time.isoformat() if trade_time else None, captured, json_dumps(row),
+                    ),
+                )
+                inserted += cursor.rowcount
+        return inserted
+
+    def save_market_activity(
+        self,
+        event_slug: str,
+        payload: dict[str, Any],
+        *,
+        captured_at_utc: dt.datetime | None = None,
+        data_time_utc: dt.datetime | None = None,
+    ) -> int:
+        captured = (captured_at_utc or utc_now()).isoformat()
+        cursor = self.conn.execute(
+            """
+            insert into market_activity_snapshots (
+                event_slug, captured_at_utc, data_time_utc, volume_24h,
+                open_interest, liquidity, trade_count, raw_json
+            ) values (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_slug, captured,
+                data_time_utc.isoformat() if data_time_utc else None,
+                parse_float(payload.get("volume24hr") or payload.get("volume_24h") or payload.get("volume")),
+                parse_float(payload.get("openInterest") or payload.get("open_interest")),
+                parse_float(payload.get("liquidity")),
+                int(payload.get("tradeCount") or payload.get("trade_count") or 0),
+                json_dumps(payload),
+            ),
+        )
+        self.conn.commit()
+        return int(cursor.lastrowid)
+
+    def save_prediction_archive(
+        self,
+        *,
+        event_slug: str,
+        captured_at_utc: dt.datetime,
+        refresh_status: str,
+        payload: dict[str, Any],
+        data_time_utc: dt.datetime | None = None,
+    ) -> int:
+        """Append one frontend-ready, time-aligned crawl record."""
+        record = {
+            "schema_version": "prediction_archive_v1",
+            "event_slug": event_slug,
+            "data_time_utc": data_time_utc.isoformat() if data_time_utc else None,
+            "captured_at_utc": captured_at_utc.isoformat(),
+            "refresh_status": refresh_status,
+            "do_not_auto_trade": True,
+            **payload,
+        }
+        cursor = self.conn.execute(
+            """
+            insert into prediction_archive (
+                event_slug, data_time_utc, captured_at_utc, refresh_status,
+                schema_version, payload_json
+            ) values (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_slug, data_time_utc.isoformat() if data_time_utc else None,
+                captured_at_utc.isoformat(), refresh_status, "prediction_archive_v1", json_dumps(record),
+            ),
+        )
+        self.conn.commit()
+        return int(cursor.lastrowid)
+
+    def prediction_archive(self, event_slug: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        bounded = max(1, min(1000, int(limit)))
+        if event_slug:
+            rows = self.conn.execute(
+                "select id, payload_json from prediction_archive where event_slug = ? order by captured_at_utc desc, id desc limit ?",
+                (event_slug, bounded),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "select id, payload_json from prediction_archive order by captured_at_utc desc, id desc limit ?",
+                (bounded,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            payload = parse_json(row[1], {})
+            if isinstance(payload, dict):
+                payload.setdefault("archive_id", int(row[0]))
+                result.append(payload)
+        return result
+
+    def history_review(
+        self,
+        event_slug: str,
+        limit: int = 100,
+        half_life_days: float = 0,
+        max_age_days: float = 365,
+    ) -> dict[str, Any]:
+        """Return a read-only, slug-isolated review DTO from local archives.
+
+        The time-decay result is an audit sensitivity only.  It deliberately
+        does not alter model parameters, a prediction, or a trading decision.
+        """
+        slug = str(event_slug or "").strip()
+        if not slug:
+            raise ValueError("slug is required")
+        bounded = max(1, min(1000, int(limit)))
+        half_life = float(half_life_days)
+        maximum_age = float(max_age_days)
+        if not math.isfinite(half_life) or not math.isfinite(maximum_age) or half_life < 0 or maximum_age <= 0:
+            raise ValueError("half_life_days must be non-negative and max_age_days must be positive")
+
+        event = self.conn.execute(
+            """
+            select slug, title, game_start_utc, end_date_utc, close_date_utc,
+                   resolution_date_utc, active, closed, accepting_orders
+            from market_events where slug = ?
+            """,
+            (slug,),
+        ).fetchone()
+        market = {
+            "slug": slug,
+            "title": event[1] if event else None,
+            "window_start_utc": event[2] if event else None,
+            "window_end_utc": event[3] if event else None,
+            "close_date_utc": event[4] if event else None,
+            "resolution_date_utc": event[5] if event else None,
+            "active": bool(event[6]) if event and event[6] is not None else None,
+            "closed": bool(event[7]) if event and event[7] is not None else None,
+            "accepting_orders": bool(event[8]) if event and event[8] is not None else None,
+        }
+
+        prediction_rows = self.conn.execute(
+            """
+            select id, data_time_utc, captured_at_utc, refresh_status, schema_version, payload_json
+            from prediction_archive where event_slug = ?
+            order by captured_at_utc asc, id asc limit ?
+            """,
+            (slug, bounded),
+        ).fetchall()
+        predictions: list[dict[str, Any]] = []
+        for row in prediction_rows:
+            payload = parse_json(row[5], {})
+            payload = payload if isinstance(payload, dict) else {}
+            prediction = payload.get("prediction") if isinstance(payload.get("prediction"), dict) else {}
+            count = payload.get("count") if isinstance(payload.get("count"), dict) else {}
+            predictions.append({
+                "archive_id": int(row[0]), "data_time_utc": row[1], "captured_at_utc": row[2],
+                "refresh_status": row[3], "schema_version": row[4],
+                "current_count": count.get("current"),
+                "forecast_final_count": prediction.get("final_count"),
+                "forecast_bin": prediction.get("forecast_bin"),
+                "source": "prediction_archive",
+            })
+
+        price_rows = self.conn.execute(
+            """
+            select p.market_id, p.token_id, p.price_time_utc, p.captured_at_utc, p.price,
+                   o.label, o.lower_count, o.upper_count
+            from market_prices p
+            left join market_outcomes o on o.event_slug = p.event_slug and o.market_id = p.market_id
+            where p.event_slug = ?
+            order by p.price_time_utc asc, p.captured_at_utc asc limit ?
+            """,
+            (slug, bounded),
+        ).fetchall()
+        prices = [
+            {
+                "market_id": row[0], "token_id": row[1], "source_price_time_utc": row[2],
+                "captured_at_utc": row[3], "price": row[4], "outcome_label": row[5],
+                "lower_count": row[6], "upper_count": row[7],
+                "time_basis": "source_price_time_and_local_capture",
+                "point_in_time_safe": True,
+            }
+            for row in price_rows
+        ]
+        book_rows = self.conn.execute(
+            """
+            select b.market_id, b.token_id, b.source_timestamp_utc, b.captured_at_utc,
+                   b.best_bid, b.best_ask, b.spread, b.bid_depth_5, b.ask_depth_5,
+                   b.depth_imbalance, b.last_trade_price, b.last_trade_side, o.label
+            from market_orderbooks b
+            left join market_outcomes o on o.event_slug = b.event_slug and o.market_id = b.market_id
+            where b.event_slug = ?
+            order by b.captured_at_utc asc limit ?
+            """,
+            (slug, bounded),
+        ).fetchall()
+        orderbooks = [
+            {
+                "market_id": row[0], "token_id": row[1], "source_timestamp_utc": row[2],
+                "captured_at_utc": row[3], "best_bid": row[4], "best_ask": row[5],
+                "spread": row[6], "bid_depth_5": row[7], "ask_depth_5": row[8],
+                "depth_imbalance": row[9], "last_trade_price": row[10], "last_trade_side": row[11],
+                "outcome_label": row[12],
+                "time_basis": "source_timestamp_and_local_capture" if row[2] else "local_capture_only",
+                "point_in_time_safe": bool(row[2]),
+            }
+            for row in book_rows
+        ]
+        activity_rows = self.conn.execute(
+            """
+            select captured_at_utc, data_time_utc, volume_24h, open_interest, liquidity, trade_count
+            from market_activity_snapshots where event_slug = ?
+            order by captured_at_utc asc, id asc limit ?
+            """,
+            (slug, bounded),
+        ).fetchall()
+        activity = [
+            {
+                "captured_at_utc": row[0], "data_time_utc": row[1], "volume_24h": row[2],
+                "open_interest": row[3], "liquidity": row[4], "trade_count": row[5],
+                "time_basis": "source_data_time_and_local_capture" if row[1] else "local_capture_only",
+            }
+            for row in activity_rows
+        ]
+
+        target_start = parse_timestamp(market["window_start_utc"])
+        references: list[dict[str, Any]] = []
+        excluded = {"no_target_start": 0, "invalid_reference_time": 0, "future_or_overlapping": 0, "too_old": 0}
+        if target_start is None:
+            excluded["no_target_start"] = 1
+        else:
+            rows = self.conn.execute(
+                """
+                select event_slug, window_end_utc, captured_at_utc, model_forecast_final_count
+                from paper_forecasts
+                where event_slug <> ? and captured_at_utc <= window_end_utc
+                order by event_slug asc, captured_at_utc desc, id desc
+                """,
+                (slug,),
+            ).fetchall()
+            seen: set[str] = set()
+            for row in rows:
+                reference_slug = str(row[0])
+                if reference_slug in seen:
+                    continue
+                seen.add(reference_slug)
+                reference_end = parse_timestamp(row[1])
+                if reference_end is None:
+                    excluded["invalid_reference_time"] += 1
+                    continue
+                age_days = (target_start - reference_end).total_seconds() / 86400
+                if age_days < 0:
+                    excluded["future_or_overlapping"] += 1
+                    continue
+                if age_days > maximum_age:
+                    excluded["too_old"] += 1
+                    continue
+                weight = 1.0 if half_life == 0 else 2 ** (-age_days / half_life)
+                references.append({
+                    "slug": reference_slug, "reference_window_end_utc": row[1],
+                    "captured_at_utc": row[2], "age_days": age_days, "weight": weight,
+                    "archived_forecast_final_count": row[3],
+                })
+        total_weight = sum(item["weight"] for item in references)
+        forecast_weight = sum(
+            item["weight"] * float(item["archived_forecast_final_count"])
+            for item in references if item["archived_forecast_final_count"] is not None
+        )
+        forecast_weight_total = sum(
+            item["weight"] for item in references if item["archived_forecast_final_count"] is not None
+        )
+        return {
+            "schema_version": "history_review_v1", "slug": slug, "do_not_auto_trade": True,
+            "market": market,
+            "coverage": {
+                "market_found": event is not None, "prediction_records": len(predictions),
+                "price_records": len(prices), "orderbook_records": len(orderbooks),
+                "activity_records": len(activity),
+                "source_notes": [
+                    "prices retain source_price_time_utc and local captured_at_utc",
+                    "orderbooks without source_timestamp_utc are local capture records, not historical orderbook replay",
+                ],
+            },
+            "predictions": predictions, "prices": prices, "orderbooks": orderbooks, "activity": activity,
+            "time_decay": {
+                "status": "sensitivity_only_not_model_feature", "half_life_days": half_life,
+                "max_age_days": maximum_age, "target_checkpoint_utc": market["window_start_utc"],
+                "eligible_prior_markets": len(references), "effective_sample_size": total_weight,
+                "weighted_archived_forecast_reference": (
+                    forecast_weight / forecast_weight_total if forecast_weight_total else None
+                ),
+                "excluded": excluded, "references": references,
+                "notice": "Read-only time-decay sensitivity; no retraining, calibration, live prediction, or decision change.",
+            },
+            "external_context": {
+                "news": {"status": "stored_not_model_feature", "items": []},
+                "flight": {"status": "not_configured", "items": []},
+                "posts": {
+                    "status": "metadata_only_not_model_feature",
+                    "time_fields": ["created_at_utc", "available_at_utc", "captured_at_utc"],
+                },
+            },
+        }
+
+    def backfill_prediction_archive(self, limit: int | None = None) -> int:
+        """Index existing paper forecasts without changing their source rows."""
+        existing_ids: set[int] = set()
+        for row in self.conn.execute("select payload_json from prediction_archive"):
+            payload = parse_json(row[0], {})
+            source = payload.get("source") if isinstance(payload, dict) else None
+            if isinstance(source, dict) and source.get("table") == "paper_forecasts":
+                try:
+                    existing_ids.add(int(source.get("id")))
+                except (TypeError, ValueError):
+                    pass
+        query = """
+            select id, event_slug, captured_at_utc, window_start_utc, window_end_utc,
+                   current_count, model_forecast_final_count, forecast_bin,
+                   forecast_bin_probability, market_expected_count, price_probability_mass,
+                   price_distribution_valid, recommendation, paper_direction, edge_proxy,
+                   do_not_auto_trade, risk_reasons, snapshot_json
+            from paper_forecasts order by captured_at_utc, id
+        """
+        params: tuple[Any, ...] = ()
+        if limit is not None:
+            query += " limit ?"
+            params = (max(0, int(limit)),)
+        inserted = 0
+        for row in self.conn.execute(query, params):
+            source_id = int(row[0])
+            if source_id in existing_ids:
+                continue
+            captured = parse_timestamp(row[2]) or utc_now()
+            payload = {
+                "source": {"table": "paper_forecasts", "id": source_id},
+                "market": {"slug": row[1]},
+                "window": {"start_utc": row[3], "end_utc": row[4]},
+                "count": {"current": row[5]},
+                "prediction": {
+                    "final_count": row[6], "forecast_bin": row[7],
+                    "forecast_bin_probability": row[8],
+                },
+                "market_distribution": {
+                    "expected_count": row[9], "probability_mass": row[10],
+                    "distribution_valid": bool(row[11]),
+                },
+                "recommendation": {
+                    "label": row[12], "paper_direction": row[13],
+                    "edge_proxy": row[14], "do_not_auto_trade": bool(row[15]),
+                    "risk_reasons": parse_json(row[16], []),
+                },
+                "snapshot": parse_json(row[17], {}),
+                "legacy_source": True,
+            }
+            self.save_prediction_archive(
+                event_slug=str(row[1]),
+                captured_at_utc=captured,
+                data_time_utc=captured,
+                refresh_status="legacy",
+                payload=payload,
+            )
+            inserted += 1
+        return inserted
 
     def save_paper_forecast(
         self,
@@ -756,6 +1597,254 @@ class MarketStore(PostStore):
         )
         self.conn.commit()
         return int(cursor.lastrowid)
+
+    @staticmethod
+    def _archive_snapshot_payload(
+        *,
+        snapshot_id: int | None,
+        captured_at_utc: str,
+        event_slug: str,
+        refresh_status: str,
+        snapshot: dict[str, Any],
+        origin: str,
+    ) -> dict[str, Any]:
+        """Return a stable archive shape for new and legacy live captures."""
+        payload = snapshot if isinstance(snapshot, dict) else {}
+        window = payload.get("window") if isinstance(payload.get("window"), dict) else {}
+        count = payload.get("count") if isinstance(payload.get("count"), dict) else {}
+        prediction = payload.get("prediction") if isinstance(payload.get("prediction"), dict) else {}
+        market = payload.get("market") if isinstance(payload.get("market"), dict) else {}
+        stock = payload.get("stock") if isinstance(payload.get("stock"), dict) else {}
+        recommendation = payload.get("recommendation") if isinstance(payload.get("recommendation"), dict) else {}
+        sources = payload.get("sources") if isinstance(payload.get("sources"), dict) else {}
+        external_context = payload.get("external_context") if isinstance(payload.get("external_context"), dict) else {}
+        flight = external_context.get("flight")
+        if not isinstance(flight, dict):
+            flight = {"status": "not_configured", "items": []}
+        items = flight.get("items")
+        flight = {
+            "status": str(flight.get("status") or "not_configured"),
+            "items": items if isinstance(items, list) else [],
+        }
+        news = payload.get("news")
+        events = payload.get("approved_events")
+        errors = payload.get("errors")
+        outcomes = market.get("outcomes")
+        market_event = payload.get("market_event")
+        capture = payload.get("capture")
+        settlement = payload.get("official_settlement")
+        return {
+            "archive_schema": "live_market_snapshot_v1",
+            "capture_origin": origin,
+            "snapshot_id": snapshot_id,
+            "captured_at_utc": captured_at_utc,
+            "slug": event_slug,
+            "refresh_status": refresh_status,
+            "capture": capture if isinstance(capture, dict) else {
+                "data_time_utc": captured_at_utc,
+                "target_interval_seconds": 300,
+                "checkpoint_utc": None,
+                "mode": "five_minute_polling",
+            },
+            "official_settlement": settlement if isinstance(settlement, dict) else {
+                "status": "pending",
+                "checked_at_utc": captured_at_utc,
+                "official_range": None,
+                "outcomes": [],
+                "source": "local_market_outcomes",
+            },
+            "window": {
+                "start_utc": window.get("start_utc"),
+                "end_utc": window.get("end_utc"),
+                "outside": bool(window.get("outside", False)),
+            },
+            "count": {
+                "current": int(count.get("current") or 0),
+                "tracker_refresh_age_seconds": count.get("tracker_refresh_age_seconds"),
+                "latest_post_capture_age_seconds": count.get("latest_post_capture_age_seconds"),
+                "posts_returned": int(count.get("posts_returned") or 0),
+                "stale": bool(count.get("stale", True)),
+            },
+            "prediction": prediction,
+            "market": {**market, "outcomes": outcomes if isinstance(outcomes, list) else []},
+            "market_event": market_event if isinstance(market_event, dict) else {},
+            "stock": {
+                "symbol": str(stock.get("symbol") or ""),
+                "price": stock.get("price"),
+                "previous_close": stock.get("previous_close"),
+                "change": stock.get("change"),
+                "change_pct": stock.get("change_pct"),
+                "currency": stock.get("currency"),
+                "as_of": stock.get("as_of"),
+                "error": stock.get("error"),
+            },
+            "news": news if isinstance(news, list) else [],
+            "approved_events": events if isinstance(events, list) else [],
+            "external_context": {**external_context, "flight": flight},
+            "sources": sources,
+            "recommendation": {**recommendation, "do_not_auto_trade": True},
+            "errors": errors if isinstance(errors, list) else [],
+        }
+
+    def save_live_snapshot(
+        self,
+        *,
+        captured_at_utc: dt.datetime,
+        event_slug: str,
+        refresh_status: str,
+        snapshot: dict[str, Any],
+    ) -> int:
+        """Append one local live capture without changing prior market records."""
+        payload = self._archive_snapshot_payload(
+            snapshot_id=None,
+            captured_at_utc=captured_at_utc.isoformat(),
+            event_slug=event_slug,
+            refresh_status=refresh_status,
+            snapshot=snapshot,
+            origin="live_snapshot",
+        )
+        count = payload["count"]
+        market = payload["market"]
+        cursor = self.conn.execute(
+            """
+            insert into live_market_snapshots (
+                captured_at_utc, event_slug, window_start_utc, window_end_utc,
+                refresh_status, current_count, posts_returned,
+                tracker_refresh_age_seconds, latest_post_capture_age_seconds,
+                model_forecast_final_count, market_expected_count,
+                market_probability_mass, market_distribution_valid,
+                source_status_json, external_context_json, errors_json, snapshot_json
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                captured_at_utc.isoformat(), event_slug,
+                payload["window"]["start_utc"], payload["window"]["end_utc"],
+                refresh_status, count["current"], count["posts_returned"],
+                count["tracker_refresh_age_seconds"], count["latest_post_capture_age_seconds"],
+                parse_float(payload["prediction"].get("final_count")),
+                parse_float(market.get("expected_count")),
+                parse_float(market.get("probability_mass")),
+                1 if market.get("distribution_valid") else 0,
+                json_dumps(payload["sources"]), json_dumps(payload["external_context"]),
+                json_dumps(payload["errors"]), json_dumps(payload),
+            ),
+        )
+        self.conn.commit()
+        return int(cursor.lastrowid)
+
+    def save_research_snapshot(
+        self,
+        *,
+        captured_at_utc: dt.datetime,
+        event_slug: str,
+        target_interval_seconds: int,
+        capture_status: str,
+        snapshot: dict[str, Any],
+    ) -> int:
+        """Append a high-frequency descriptive capture outside the decision archive.
+
+        These rows are deliberately separate from five-minute live snapshots:
+        they can support short-horizon research without becoming historical
+        prediction, edge, or paper-trade inputs.
+        """
+        count = snapshot.get("count") if isinstance(snapshot.get("count"), dict) else {}
+        capture = snapshot.get("capture") if isinstance(snapshot.get("capture"), dict) else {}
+        sources = snapshot.get("sources") if isinstance(snapshot.get("sources"), dict) else {}
+        errors = snapshot.get("errors") if isinstance(snapshot.get("errors"), list) else []
+        cursor = self.conn.execute(
+            """
+            insert into research_market_snapshots (
+                event_slug, captured_at_utc, bucket_start_utc,
+                target_interval_seconds, capture_status, current_count,
+                posts_returned, tracker_refresh_age_seconds,
+                source_status_json, errors_json, snapshot_json
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_slug,
+                captured_at_utc.isoformat(),
+                capture.get("bucket_start_utc"),
+                int(target_interval_seconds),
+                str(capture_status),
+                count.get("current"),
+                int(count.get("posts_returned") or 0),
+                count.get("tracker_refresh_age_seconds"),
+                json_dumps(sources),
+                json_dumps(errors),
+                json_dumps(snapshot),
+            ),
+        )
+        self.conn.commit()
+        return int(cursor.lastrowid)
+
+    def research_snapshot_archive(self, event_slug: str, limit: int = 120) -> list[dict[str, Any]]:
+        bounded_limit = max(1, min(2000, int(limit)))
+        rows = self.conn.execute(
+            """
+            select id, captured_at_utc, capture_status, snapshot_json
+            from research_market_snapshots
+            where event_slug = ?
+            order by captured_at_utc desc, id desc
+            limit ?
+            """,
+            (event_slug, bounded_limit),
+        ).fetchall()
+        return [
+            {
+                "id": int(row[0]),
+                "captured_at_utc": str(row[1]),
+                "capture_status": str(row[2]),
+                **parse_json(row[3], {}),
+                "research_only": True,
+                "do_not_auto_trade": True,
+            }
+            for row in rows
+        ]
+
+    def latest_research_snapshot(self, event_slug: str) -> dict[str, Any] | None:
+        rows = self.research_snapshot_archive(event_slug, 1)
+        return rows[0] if rows else None
+
+    def live_snapshot_archive(self, event_slug: str, limit: int = 100) -> list[dict[str, Any]]:
+        """Read current captures or normalize the older paper-forecast snapshots."""
+        bounded_limit = max(1, min(1000, int(limit)))
+        rows = self.conn.execute(
+            """
+            select id, captured_at_utc, refresh_status, snapshot_json
+            from live_market_snapshots
+            where event_slug = ?
+            order by captured_at_utc desc, id desc
+            limit ?
+            """,
+            (event_slug, bounded_limit),
+        ).fetchall()
+        if rows:
+            return [
+                self._archive_snapshot_payload(
+                    snapshot_id=int(row[0]), captured_at_utc=str(row[1]),
+                    event_slug=event_slug, refresh_status=str(row[2]),
+                    snapshot=parse_json(row[3], {}), origin="live_snapshot",
+                )
+                for row in rows
+            ]
+        legacy_rows = self.conn.execute(
+            """
+            select id, captured_at_utc, snapshot_json
+            from paper_forecasts
+            where event_slug = ?
+            order by captured_at_utc desc, id desc
+            limit ?
+            """,
+            (event_slug, bounded_limit),
+        ).fetchall()
+        return [
+            self._archive_snapshot_payload(
+                snapshot_id=int(row[0]), captured_at_utc=str(row[1]),
+                event_slug=event_slug, refresh_status="legacy",
+                snapshot=parse_json(row[2], {}), origin="legacy_paper_forecast",
+            )
+            for row in legacy_rows
+        ]
 
     def save_paper_trade(
         self,
@@ -1177,6 +2266,28 @@ class MarketStore(PostStore):
         ).fetchall()
         return [parsed for row in rows if (parsed := parse_timestamp(row[0])) is not None]
 
+    def post_observations(self, user: str, platform: str) -> list[PostObservation]:
+        """Load event and availability times without rewriting legacy rows."""
+        columns = {row[1] for row in self.conn.execute("pragma table_info(posts)")}
+        availability = "available_at_utc" if "available_at_utc" in columns else "captured_at_utc"
+        rows = self.conn.execute(
+            f"""
+            select created_at_utc, {availability}
+            from posts
+            where user = ? and platform = ? and created_at_utc is not null
+            order by created_at_utc
+            """,
+            (user, platform),
+        ).fetchall()
+        observations: list[PostObservation] = []
+        for created_raw, available_raw in rows:
+            created = parse_timestamp(created_raw)
+            if created is None:
+                continue
+            available = parse_timestamp(available_raw) if available_raw else None
+            observations.append(PostObservation(created, available))
+        return observations
+
     def final_count(self, window: Window, user: str, platform: str) -> int:
         return self.conn.execute(
             """
@@ -1219,27 +2330,288 @@ class MarketStore(PostStore):
         return (lower is None or count >= lower) and (upper is None or count <= upper)
 
     def latest_prices(self, slug: str, as_of: dt.datetime, max_age_hours: float) -> list[tuple[int | None, int | None, float]]:
+        return [(row['lower_count'], row['upper_count'], float(row['price']))
+                for row in self.prices_at(slug, as_of, max_age_hours)]
+
+    def prices_at(self, slug: str, as_of: dt.datetime, max_age_hours: float) -> list[dict[str, Any]]:
+        """Return the latest locally archived price per token at a checkpoint."""
         rows = self.conn.execute(
             """
-            select o.lower_count, o.upper_count, p.price
-            from market_outcomes o
-            join market_prices p on p.event_slug = o.event_slug and p.market_id = o.market_id
-            where o.event_slug = ? and p.price_time_utc <= ?
+            select p.market_id, p.token_id, p.price_time_utc, p.captured_at_utc, p.price,
+                   o.label, o.lower_count, o.upper_count, p.resolution_seconds
+            from market_prices p
+            left join market_outcomes o on o.event_slug = p.event_slug and o.market_id = p.market_id
+            where p.event_slug = ? and p.price_time_utc <= ?
+              and p.captured_at_utc <= ?
               and p.price_time_utc >= ?
-              and p.price_time_utc = (
-                select max(p2.price_time_utc) from market_prices p2
-                where p2.event_slug = p.event_slug and p2.market_id = p.market_id
-                  and p2.token_id = p.token_id and p2.price_time_utc <= ?
+              and (o.yes_token_id is null or p.token_id = o.yes_token_id)
+            order by p.market_id, p.token_id, p.price_time_utc desc
+            """,
+            (
+                slug,
+                as_of.isoformat(),
+                as_of.isoformat(),
+                (as_of - dt.timedelta(hours=max_age_hours)).isoformat(),
+            ),
+        ).fetchall()
+        result = []
+        seen = set()
+        for row in rows:
+            source_time = parse_timestamp(row[2])
+            key = (row[0], row[1])
+            if key in seen or not price_known_by(source_time, parse_timestamp(row[3]), row[8], as_of):
+                continue
+            seen.add(key)
+            result.append({
+                "market_id": row[0], "token_id": row[1], "source_price_time_utc": row[2],
+                "captured_at_utc": row[3], "price": row[4], "outcome_label": row[5],
+                "lower_count": row[6], "upper_count": row[7],
+                "resolution_seconds": row[8], "point_in_time_safe": True,
+                "age_minutes": round(max(0.0, (as_of - source_time).total_seconds() / 60), 3)
+                if source_time else None,
+            })
+        return result
+
+    def orderbooks_at(self, slug: str, as_of: dt.datetime, max_age_hours: float) -> list[dict[str, Any]]:
+        """Return point-in-time-safe orderbook observations available at a checkpoint."""
+        rows = self.conn.execute(
+            """
+            select b.market_id, b.token_id, b.source_timestamp_utc, b.captured_at_utc,
+                   b.best_bid, b.best_ask, b.spread, b.bid_depth_5, b.ask_depth_5,
+                   b.depth_imbalance, b.last_trade_price, b.last_trade_side, o.label
+            from market_orderbooks b
+            left join market_outcomes o on o.event_slug = b.event_slug and o.market_id = b.market_id
+            where b.event_slug = ? and b.captured_at_utc <= ?
+              and b.captured_at_utc >= ?
+              and b.captured_at_utc = (
+                select max(b2.captured_at_utc) from market_orderbooks b2
+                where b2.event_slug = b.event_slug
+                  and b2.market_id = b.market_id
+                  and b2.token_id = b.token_id
+                  and b2.captured_at_utc <= ?
+                  and b2.captured_at_utc >= ?
               )
+            order by b.captured_at_utc desc
             """,
             (
                 slug,
                 as_of.isoformat(),
                 (as_of - dt.timedelta(hours=max_age_hours)).isoformat(),
                 as_of.isoformat(),
+                (as_of - dt.timedelta(hours=max_age_hours)).isoformat(),
             ),
         ).fetchall()
-        return [(row[0], row[1], float(row[2])) for row in rows]
+        result = []
+        for row in rows:
+            source_time = parse_timestamp(row[2])
+            captured = parse_timestamp(row[3])
+            result.append({
+                "market_id": row[0], "token_id": row[1], "source_timestamp_utc": row[2],
+                "captured_at_utc": row[3], "best_bid": row[4], "best_ask": row[5],
+                "spread": row[6], "bid_depth_5": row[7], "ask_depth_5": row[8],
+                "depth_imbalance": row[9], "last_trade_price": row[10], "last_trade_side": row[11],
+                "outcome_label": row[12],
+                "source_age_minutes": round(max(0.0, (as_of - source_time).total_seconds() / 60), 3)
+                if source_time else None,
+                "capture_age_minutes": round(max(0.0, (as_of - captured).total_seconds() / 60), 3)
+                if captured else None,
+                "point_in_time_safe": bool(source_time),
+            })
+        return result
+
+    def prices_in_window(self, slug: str, as_of: dt.datetime, max_age_hours: float, window_minutes: int = 5) -> list[dict[str, Any]]:
+        """Aggregate locally captured prices in the backward-looking checkpoint window.
+
+        Only rows whose source/capture timestamps are no later than ``as_of`` are
+        considered.  The latest row per token is retained for pricing while
+        sample count and range statistics describe the whole window.
+        """
+        start = max(as_of - dt.timedelta(hours=max_age_hours), as_of - dt.timedelta(minutes=max(1, window_minutes)))
+        rows = self.conn.execute(
+            """
+            select p.market_id, p.token_id, p.price_time_utc, p.captured_at_utc, p.price,
+                   o.label, o.lower_count, o.upper_count, p.resolution_seconds
+            from market_prices p
+            left join market_outcomes o on o.event_slug = p.event_slug and o.market_id = p.market_id
+            where p.event_slug = ? and p.captured_at_utc >= ? and p.captured_at_utc < ?
+              and p.captured_at_utc <= ? and p.price_time_utc <= ?
+              and (o.yes_token_id is null or p.token_id = o.yes_token_id)
+            order by p.market_id, p.token_id, p.captured_at_utc desc
+            """,
+            (slug, start.isoformat(), as_of.isoformat(), as_of.isoformat(), as_of.isoformat()),
+        ).fetchall()
+        grouped: dict[tuple[Any, Any], list[Any]] = {}
+        for row in rows:
+            if not price_known_by(parse_timestamp(row[2]), parse_timestamp(row[3]), row[8], as_of):
+                continue
+            grouped.setdefault((row[0], row[1]), []).append(row)
+        result: list[dict[str, Any]] = []
+        for values in grouped.values():
+            latest = values[0]
+            numeric = [float(item[4]) for item in values if item[4] is not None]
+            source_time = parse_timestamp(latest[2])
+            captured = parse_timestamp(latest[3])
+            result.append({
+                "market_id": latest[0], "token_id": latest[1], "source_price_time_utc": latest[2],
+                "captured_at_utc": latest[3], "price": latest[4], "outcome_label": latest[5],
+                "lower_count": latest[6], "upper_count": latest[7],
+                "age_minutes": round(max(0.0, (as_of - source_time).total_seconds() / 60), 3) if source_time else None,
+                "window_sample_count": len(numeric),
+                "window_price_min": min(numeric) if numeric else None,
+                "window_price_max": max(numeric) if numeric else None,
+                "window_price_mean": (sum(numeric) / len(numeric)) if numeric else None,
+                "aggregation_window_start_utc": start.isoformat(),
+                "aggregation_window_end_utc": as_of.isoformat(),
+                "aggregation_method": "latest_per_token_with_window_stats",
+                "resolution_seconds": latest[8],
+                "point_in_time_safe": price_known_by(source_time, captured, latest[8], as_of),
+            })
+        return result
+
+    def historical_prices_in_window(
+        self, slug: str, as_of: dt.datetime, window_minutes: int = 5
+    ) -> list[dict[str, Any]]:
+        """Return source-timed prices for review, including later local backfills.
+
+        These rows are display-only when captured after ``as_of`` and must not
+        be used as point-in-time model features or executable quotes.
+        """
+        start = as_of - dt.timedelta(minutes=max(1, window_minutes))
+        rows = self.conn.execute(
+            """
+            select p.market_id, p.token_id, p.price_time_utc, p.captured_at_utc, p.price,
+                   o.label, o.lower_count, o.upper_count, p.resolution_seconds, p.source
+            from market_prices p
+            left join market_outcomes o on o.event_slug = p.event_slug and o.market_id = p.market_id
+            where p.event_slug = ? and p.price_time_utc >= ? and p.price_time_utc < ?
+              and (o.yes_token_id is null or p.token_id = o.yes_token_id)
+            order by p.market_id, p.token_id, p.price_time_utc desc, p.captured_at_utc desc
+            """,
+            (slug, start.isoformat(), as_of.isoformat()),
+        ).fetchall()
+        grouped: dict[tuple[Any, Any], list[Any]] = {}
+        for row in rows:
+            grouped.setdefault((row[0], row[1]), []).append(row)
+        result: list[dict[str, Any]] = []
+        for values in grouped.values():
+            latest = values[0]
+            numeric = [float(item[4]) for item in values if item[4] is not None]
+            source_time = parse_timestamp(latest[2])
+            captured = parse_timestamp(latest[3])
+            point_in_time_safe = price_known_by(source_time, captured, latest[8], as_of)
+            result.append({
+                "market_id": latest[0], "token_id": latest[1],
+                "source_price_time_utc": latest[2], "captured_at_utc": latest[3],
+                "price": latest[4], "outcome_label": latest[5],
+                "lower_count": latest[6], "upper_count": latest[7],
+                "age_minutes": round(max(0.0, (as_of - source_time).total_seconds() / 60), 3) if source_time else None,
+                "window_sample_count": len(numeric),
+                "window_price_min": min(numeric) if numeric else None,
+                "window_price_max": max(numeric) if numeric else None,
+                "window_price_mean": sum(numeric) / len(numeric) if numeric else None,
+                "aggregation_window_start_utc": start.isoformat(),
+                "aggregation_window_end_utc": as_of.isoformat(),
+                "aggregation_method": "source_timed_history_for_review",
+                "resolution_seconds": latest[8],
+                "observation_end_utc": (source_time + dt.timedelta(seconds=latest[8])).isoformat()
+                    if source_time and latest[8] is not None and latest[8] >= 0 else None,
+                "price_source": latest[9] or "price_history",
+                "coarser_than_review_window": bool(latest[8] and latest[8] > max(1, window_minutes) * 60),
+                "point_in_time_safe": point_in_time_safe,
+                "backfilled_after_checkpoint": bool(captured and captured > as_of),
+                "review_only": not point_in_time_safe,
+            })
+        return result
+
+    def orderbooks_in_window(self, slug: str, as_of: dt.datetime, max_age_hours: float, window_minutes: int = 5) -> list[dict[str, Any]]:
+        """Aggregate locally captured order-book snapshots in a safe 5-minute window."""
+        start = max(as_of - dt.timedelta(hours=max_age_hours), as_of - dt.timedelta(minutes=max(1, window_minutes)))
+        token_cache = getattr(self, "_replay_book_tokens", None)
+        prefix, token_join, token_filter, token_params = "", "", "", []
+        if token_cache is not None:
+            if slug not in token_cache:
+                token_cache[slug] = self.conn.execute(
+                    "select distinct market_id, token_id from market_orderbooks where event_slug = ?", (slug,)
+                ).fetchall()
+            pairs = token_cache[slug]
+            if not pairs:
+                return []
+            # The existing PK is (slug, market_id, token_id, captured_at).
+            # Bind its leading columns instead of scanning every snapshot for
+            # the slug at every checkpoint. Retain NO tokens for audit too.
+            prefix = "with replay_tokens(market_id,token_id) as (values " + ",".join("(?,?)" for _ in pairs) + ") "
+            token_join = "replay_tokens t cross join "
+            token_filter = "and b.market_id = t.market_id and b.token_id = t.token_id"
+            token_params = [value for pair in pairs for value in pair]
+        rows = self.conn.execute(
+            prefix + f"""
+            select b.market_id, b.token_id, b.source_timestamp_utc, b.captured_at_utc,
+                   b.best_bid, b.best_ask, b.spread, b.bid_depth_5, b.ask_depth_5,
+                   b.depth_imbalance, b.last_trade_price, b.last_trade_side, o.label, b.raw_json, o.yes_token_id
+            from {token_join}market_orderbooks b
+            left join market_outcomes o on o.event_slug = b.event_slug and o.market_id = b.market_id
+            where b.event_slug = ? and b.captured_at_utc >= ? and b.captured_at_utc < ?
+              and b.captured_at_utc <= ?
+              {token_filter}
+            order by b.market_id, b.token_id, b.captured_at_utc desc
+            """,
+            (*token_params, slug, start.isoformat(), as_of.isoformat(), as_of.isoformat()),
+        ).fetchall()
+        grouped: dict[tuple[Any, Any], list[Any]] = {}
+        for row in rows:
+            grouped.setdefault((row[0], row[1]), []).append(row)
+        result: list[dict[str, Any]] = []
+        for values in grouped.values():
+            def assess(item):
+                saved = parse_timestamp(item[2])
+                try:
+                    raw = json.loads(item[13])
+                    source = parse_timestamp(raw.get("timestamp")) if raw.get("timestamp") is not None else saved
+                except (ValueError, TypeError, AttributeError):
+                    source = None
+                captured = parse_timestamp(item[3])
+                reason = "safe"
+                if item[1] != item[14]:
+                    reason = "wrong_yes_token"
+                elif source is None or captured is None or source.year < 2000:
+                    reason = "invalid_source_time"
+                elif source > as_of or captured > as_of:
+                    reason = "future_book"
+                elif (as_of - source).total_seconds() > min(300, max_age_hours * 3600):
+                    reason = "stale_book"
+                elif any(item[i] is None or not math.isfinite(float(item[i])) for i in (4, 5, 7, 8)):
+                    reason = "invalid_quote"
+                elif not 0 <= item[4] <= item[5] <= 1 or min(item[7], item[8]) < 0:
+                    reason = "invalid_quote"
+                return source, captured, reason, source is not None and source != saved
+
+            latest = next((item for item in values if assess(item)[2] == "safe"), values[0])
+            source_time, captured, reason, recovered = assess(latest)
+            spreads = [float(item[6]) for item in values if item[6] is not None]
+            asks = [float(item[5]) for item in values if item[5] is not None]
+            depths = [float(item[8]) for item in values if item[8] is not None]
+
+            result.append({
+                "market_id": latest[0], "token_id": latest[1], "source_timestamp_utc": source_time.isoformat() if source_time else None,
+                "stored_source_timestamp_utc": latest[2], "source_time_recovered": recovered,
+                "book_rejection_reason": reason,
+                "captured_at_utc": latest[3], "best_bid": latest[4], "best_ask": latest[5], "spread": latest[6],
+                "bid_depth_5": latest[7], "ask_depth_5": latest[8], "depth_imbalance": latest[9],
+                "last_trade_price": latest[10], "last_trade_side": latest[11], "outcome_label": latest[12],
+                "source_age_minutes": round(max(0.0, (as_of - source_time).total_seconds() / 60), 3) if source_time else None,
+                "capture_age_minutes": round(max(0.0, (as_of - captured).total_seconds() / 60), 3) if captured else None,
+                "point_in_time_safe": reason == "safe",
+                "window_snapshot_count": len(values),
+                "window_spread_min": min(spreads) if spreads else None,
+                "window_spread_max": max(spreads) if spreads else None,
+                "window_ask_depth_min": min(depths) if depths else None,
+                "window_ask_depth_max": max(depths) if depths else None,
+                "window_ask_mean": (sum(asks) / len(asks)) if asks else None,
+                "aggregation_window_start_utc": start.isoformat(),
+                "aggregation_window_end_utc": as_of.isoformat(),
+                "aggregation_method": "latest_snapshot_with_window_stats",
+            })
+        return result
 
     def events_before(self, start: dt.datetime, as_of: dt.datetime) -> list[tuple[str, float]]:
         rows = self.conn.execute(
@@ -1247,6 +2619,7 @@ class MarketStore(PostStore):
             select kind, impact
             from external_events
             where occurred_at_utc >= ? and occurred_at_utc < ?
+              and coalesce(available_at_utc, occurred_at_utc) <= ?
             union all
             select kind, bounded_impact
             from source_events
@@ -1256,6 +2629,7 @@ class MarketStore(PostStore):
             """,
             (
                 start.isoformat(),
+                as_of.isoformat(),
                 as_of.isoformat(),
                 start.isoformat(),
                 as_of.isoformat(),
@@ -1274,6 +2648,7 @@ class MarketStore(PostStore):
             select occurred_at_utc, kind, impact
             from external_events
             where occurred_at_utc >= ? and occurred_at_utc < ?
+              and coalesce(available_at_utc, occurred_at_utc) <= ?
             union all
             select occurred_at_utc, kind, bounded_impact
             from source_events
@@ -1284,6 +2659,7 @@ class MarketStore(PostStore):
             """,
             (
                 start.isoformat(),
+                as_of.isoformat(),
                 as_of.isoformat(),
                 start.isoformat(),
                 as_of.isoformat(),
@@ -1325,8 +2701,22 @@ class MarketStore(PostStore):
         ).fetchone()
 
 
-def count_before(times: list[dt.datetime], start: dt.datetime, end: dt.datetime) -> int:
-    return sum(start <= value < end for value in times)
+def count_before(
+    times: list[dt.datetime] | list[PostObservation],
+    start: dt.datetime,
+    end: dt.datetime,
+    available_as_of: dt.datetime | None = None,
+) -> int:
+    count = 0
+    for item in times:
+        value = item.created_at_utc if isinstance(item, PostObservation) else item
+        if not (start <= value < end):
+            continue
+        if available_as_of is not None and isinstance(item, PostObservation):
+            if item.available_at_utc is not None and item.available_at_utc > available_as_of:
+                continue
+        count += 1
+    return count
 
 
 def outcome_midpoint(lower: int | None, upper: int | None, default_width: int = 20) -> float:
@@ -1463,7 +2853,7 @@ def market_features(
     store: MarketStore,
     window: Window,
     as_of: dt.datetime,
-    times: list[dt.datetime],
+    times: list[dt.datetime] | list[PostObservation],
     prior_rate: float,
     max_price_age_hours: float,
     live_prices: list[tuple[int | None, int | None, float]] | None = None,
@@ -1471,13 +2861,13 @@ def market_features(
     total_hours = max((window.end_utc - window.start_utc).total_seconds() / 3600, 1)
     elapsed = max((as_of - window.start_utc).total_seconds() / 3600, 0)
     remaining = max((window.end_utc - as_of).total_seconds() / 3600, 0)
-    current = count_before(times, window.start_utc, as_of)
-    count_6h = count_before(times, max(window.start_utc, as_of - dt.timedelta(hours=6)), as_of)
-    count_24h = count_before(times, max(window.start_utc, as_of - dt.timedelta(hours=24)), as_of)
-    count_1h = count_before(times, max(window.start_utc, as_of - dt.timedelta(hours=1)), as_of)
-    count_3h = count_before(times, max(window.start_utc, as_of - dt.timedelta(hours=3)), as_of)
-    count_12h = count_before(times, max(window.start_utc, as_of - dt.timedelta(hours=12)), as_of)
-    count_48h = count_before(times, max(window.start_utc, as_of - dt.timedelta(hours=48)), as_of)
+    current = count_before(times, window.start_utc, as_of, as_of)
+    count_6h = count_before(times, max(window.start_utc, as_of - dt.timedelta(hours=6)), as_of, as_of)
+    count_24h = count_before(times, max(window.start_utc, as_of - dt.timedelta(hours=24)), as_of, as_of)
+    count_1h = count_before(times, max(window.start_utc, as_of - dt.timedelta(hours=1)), as_of, as_of)
+    count_3h = count_before(times, max(window.start_utc, as_of - dt.timedelta(hours=3)), as_of, as_of)
+    count_12h = count_before(times, max(window.start_utc, as_of - dt.timedelta(hours=12)), as_of, as_of)
+    count_48h = count_before(times, max(window.start_utc, as_of - dt.timedelta(hours=48)), as_of, as_of)
     pace = current / elapsed * total_hours if elapsed else 0.0
     last_1h_rate = float(count_1h)
     last_3h_rate = count_3h / 3
@@ -1570,7 +2960,7 @@ def build_examples(
     require_verified_final_count: bool,
     use_resolved_bin_labels: bool = False,
 ) -> list[Example]:
-    times = store.post_times(user, platform)
+    times = store.post_observations(user, platform)
     labels = {
         window.slug: training_label_for_window(
             store,
@@ -1862,12 +3252,21 @@ def prior_rate_for_windows(
     return total_count / total_hours if total_hours else 0.0
 
 
-def hourly_checkpoints(window: Window, min_elapsed_hours: float) -> list[dt.datetime]:
-    first = window.start_utc + dt.timedelta(hours=min_elapsed_hours)
+def hourly_checkpoints(
+    window: Window,
+    min_elapsed_hours: float = 1,
+    step_minutes: float = 60,
+    min_elapsed_minutes: float | None = None,
+) -> list[dt.datetime]:
+    """Generate sliding checkpoints; minute resolution is supported for replay."""
+    if min_elapsed_minutes is None:
+        min_elapsed_minutes = min_elapsed_hours * 60
+    first = window.start_utc + dt.timedelta(minutes=max(0.0, min_elapsed_minutes))
     checkpoints: list[dt.datetime] = []
+    step = dt.timedelta(minutes=max(0.1, step_minutes))
     while first < window.end_utc:
         checkpoints.append(first)
-        first += dt.timedelta(hours=1)
+        first += step
     return checkpoints
 
 
@@ -1882,12 +3281,16 @@ def write_hourly_test_reports(
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     hourly_fields = [
         "slug", "checkpoint_utc", "elapsed_hours", "current_count",
+        "remaining_hours", "checkpoint_step_minutes", "post_data_available_as_of",
         "model_forecast_final_count", "forecast_bin", "observed_local_final_count",
         "resolved_bin", "resolved_lower", "resolved_upper", "forecast_in_resolved_bin",
         "observed_count_verified", "absolute_error_to_observed_count",
         "market_expected_count", "price_probability_mass", "price_distribution_valid", "training_windows",
         "model_source", "prediction_variance", "forecast_bin_probability",
         "resolved_bin_probability", "bin_probabilities_json", "brier_score", "log_loss",
+        "price_snapshot_time_utc", "price_snapshot_age_minutes", "price_snapshot_json",
+        "orderbook_snapshot_time_utc", "orderbook_snapshot_age_minutes", "orderbook_snapshot_json",
+        "model_market_edge", "decision_status", "data_quality_flags",
     ]
     summary_fields = [
         "slug", "status", "hourly_predictions", "training_windows", "model_source",
@@ -1895,6 +3298,8 @@ def write_hourly_test_reports(
         "hourly_mae_to_observed_count", "last_forecast_final_count", "last_forecast_bin",
         "last_forecast_in_resolved_bin", "mean_resolved_bin_probability",
         "brier_score", "log_loss", "note",
+        "paper_candidate_checkpoints", "quality_limited_checkpoints",
+        "mean_model_market_edge", "backtest_step_minutes",
     ]
     with report_path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=hourly_fields)
@@ -1939,7 +3344,7 @@ def hourly_test_command(args: argparse.Namespace) -> None:
             raise SystemExit("No ended markets found in the requested local-data range.")
 
         fixed_model = load_model(Path(args.model)) if args.model else None
-        times = store.post_times(args.user, args.platform)
+        times = store.post_observations(args.user, args.platform)
         hourly_rows: list[dict[str, Any]] = []
         summaries: list[dict[str, Any]] = []
 
@@ -2012,7 +3417,12 @@ def hourly_test_command(args: argparse.Namespace) -> None:
             )
             verified = store.final_count_is_verified(window, args.user, args.platform)
             market_rows: list[dict[str, Any]] = []
-            for checkpoint in hourly_checkpoints(window, args.min_elapsed_hours):
+            for checkpoint in hourly_checkpoints(
+                window,
+                args.min_elapsed_hours,
+                args.step_minutes,
+                args.min_elapsed_minutes,
+            ):
                 features = market_features(
                     store, window, checkpoint, times, prior_rate, args.max_price_age_hours
                 )
@@ -2030,6 +3440,35 @@ def hourly_test_command(args: argparse.Namespace) -> None:
                 )
                 forecast_probability = probabilities[forecast_index] if forecast_index is not None else None
                 resolved_probability = probabilities[resolved_index] if resolved_index is not None else None
+                price_rows = store.prices_at(window.slug, checkpoint, args.max_price_age_hours)
+                book_rows = store.orderbooks_at(window.slug, checkpoint, args.max_price_age_hours)
+                price_source_times = [parse_timestamp(row["source_price_time_utc"]) for row in price_rows]
+                book_capture_times = [parse_timestamp(row["captured_at_utc"]) for row in book_rows]
+                price_time = max((value for value in price_source_times if value), default=None)
+                book_time = max((value for value in book_capture_times if value), default=None)
+                selected_book = next((row for row in book_rows if row.get("outcome_label") == forecast_bin), None)
+                executable_ask = selected_book.get("best_ask") if selected_book else None
+                edge = (
+                    float(forecast_probability) - float(executable_ask)
+                    if forecast_probability is not None and executable_ask is not None else None
+                )
+                quality_flags: list[str] = []
+                if not price_rows:
+                    quality_flags.append("missing_price_snapshot")
+                if not book_rows:
+                    quality_flags.append("missing_orderbook_snapshot")
+                if book_rows and not any(row.get("point_in_time_safe") for row in book_rows):
+                    quality_flags.append("orderbook_capture_time_only")
+                if features[8] and not price_distribution_is_valid(features[8]):
+                    quality_flags.append("invalid_price_probability_mass")
+                decision_status = "no_trade_data_insufficient"
+                if edge is not None and selected_book:
+                    spread = float(selected_book.get("spread") or 0.0)
+                    depth = float(selected_book.get("ask_depth_5") or 0.0)
+                    if edge >= args.backtest_min_edge and spread <= args.backtest_max_spread and depth >= args.backtest_min_depth:
+                        decision_status = "paper_candidate_only"
+                    else:
+                        decision_status = "no_trade_quality_or_edge"
                 brier_score = None
                 log_loss = None
                 if resolved_index is not None:
@@ -2048,6 +3487,9 @@ def hourly_test_command(args: argparse.Namespace) -> None:
                     "checkpoint_utc": checkpoint.isoformat(),
                     "elapsed_hours": round((checkpoint - window.start_utc).total_seconds() / 3600, 2),
                     "current_count": int(features[0]),
+                    "remaining_hours": round((window.end_utc - checkpoint).total_seconds() / 3600, 2),
+                    "checkpoint_step_minutes": args.step_minutes,
+                    "post_data_available_as_of": checkpoint.isoformat(),
                     "model_forecast_final_count": round(forecast, 4),
                     "forecast_bin": forecast_bin,
                     "observed_local_final_count": observed_final,
@@ -2073,6 +3515,15 @@ def hourly_test_command(args: argparse.Namespace) -> None:
                     }),
                     "brier_score": round(brier_score, 6) if brier_score is not None else None,
                     "log_loss": round(log_loss, 6) if log_loss is not None else None,
+                    "price_snapshot_time_utc": price_time.isoformat() if price_time else None,
+                    "price_snapshot_age_minutes": round((checkpoint - price_time).total_seconds() / 60, 3) if price_time else None,
+                    "price_snapshot_json": json_dumps(price_rows),
+                    "orderbook_snapshot_time_utc": book_time.isoformat() if book_time else None,
+                    "orderbook_snapshot_age_minutes": round((checkpoint - book_time).total_seconds() / 60, 3) if book_time else None,
+                    "orderbook_snapshot_json": json_dumps(book_rows),
+                    "model_market_edge": round(edge, 6) if edge is not None else None,
+                    "decision_status": decision_status,
+                    "data_quality_flags": json_dumps(quality_flags),
                 })
             hourly_rows.extend(market_rows)
             last_row = market_rows[-1] if market_rows else {}
@@ -2103,6 +3554,17 @@ def hourly_test_command(args: argparse.Namespace) -> None:
                     row["log_loss"] for row in market_rows
                     if row["log_loss"] is not None
                 ), 6) if any(row["log_loss"] is not None for row in market_rows) else None,
+                "paper_candidate_checkpoints": sum(
+                    row.get("decision_status") == "paper_candidate_only" for row in market_rows
+                ),
+                "quality_limited_checkpoints": sum(
+                    row.get("decision_status") != "paper_candidate_only" for row in market_rows
+                ),
+                "mean_model_market_edge": round(mean(
+                    row["model_market_edge"] for row in market_rows
+                    if row["model_market_edge"] is not None
+                ), 6) if any(row["model_market_edge"] is not None for row in market_rows) else None,
+                "backtest_step_minutes": args.step_minutes,
                 "note": (
                     "Observed local count is outside the resolved bin; treat error metrics as exploratory."
                     if verified is False else ""
@@ -2130,23 +3592,54 @@ def hourly_test_command(args: argparse.Namespace) -> None:
 
 
 def crawl_one(args: argparse.Namespace, slug: str) -> dict[str, Any]:
+    try:
+        request_delay = float(getattr(args, "request_delay", 0.1))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("request_delay must be finite and nonnegative") from exc
+    if not math.isfinite(request_delay) or request_delay < 0:
+        raise ValueError("request_delay must be finite and nonnegative")
     gamma = GammaClient(args.gamma_url, args.timeout, args.proxy)
     clob = ClobClient(args.clob_url, args.timeout, args.proxy)
+    data_client = PublicDataClient(getattr(args, "data_url", "https://data-api.polymarket.com"), args.timeout, args.proxy)
+    clob.request_delay = request_delay
+    data_client.request_delay = request_delay
     tracker = XTrackerClient(args.tracker_url, args.timeout, args.proxy)
     store = MarketStore(Path(args.db))
+    try:
+        price_fidelity_minutes = int(getattr(args, "price_fidelity", 5))
+    except (TypeError, ValueError) as exc:
+        store.close()
+        raise ValueError("price_fidelity must be a positive number of minutes") from exc
+    if price_fidelity_minutes <= 0:
+        store.close()
+        raise ValueError("price_fidelity must be a positive number of minutes")
+    captured_at = utc_now()
+    event: dict[str, Any] | None = None
+    status = "failed"
     result: dict[str, Any] = {
         "slug": slug,
+        "captured_at_utc": captured_at.isoformat(),
+        "data_time_utc": None,
         "posts_returned": 0,
         "new_posts_inserted": 0,
         "new_price_rows": 0,
         "new_orderbook_rows": 0,
+        "new_trade_rows": 0,
+        "market_activity_archive_id": None,
+        "batch_clob": bool(getattr(args, "batch_clob", True)),
         "price_errors": 0,
         "orderbook_errors": 0,
+        "trade_errors": 0,
+        "price_fidelity_minutes": price_fidelity_minutes,
         "source_errors": [],
     }
     try:
         event = gamma.get_event(slug)
         window = store.save_event(event, args.timezone)
+        # The crawl record represents the latest source snapshot at capture time;
+        # the logical market window remains in the nested metadata.
+        result["data_time_utc"] = captured_at.isoformat()
+        result["market_event"] = event
         result.update({
             "window_start_utc": window.start_utc.isoformat(),
             "window_end_utc": window.end_utc.isoformat(),
@@ -2180,6 +3673,7 @@ def crawl_one(args: argparse.Namespace, slug: str) -> dict[str, Any]:
             result["posts_returned"],
         )
         result["post_freshness_seconds"] = freshness
+        result["source_age_seconds"] = {"xtracker": freshness, "gamma": 0}
         resolved_range = store.resolved_range(slug)
         if resolved_range is not None:
             confirmed = result["confirmed_count"] = store.final_count(window, args.user, args.platform)
@@ -2196,42 +3690,193 @@ def crawl_one(args: argparse.Namespace, slug: str) -> dict[str, Any]:
             "select market_id, yes_token_id from market_outcomes where event_slug = ? and yes_token_id is not null",
             (slug,),
         ).fetchall()
+        token_ids = [str(row[1]) for row in outcomes]
+        history_end = min(window.end_utc, captured_at)
+        result['price_coverage'] = []
+        result['price_requests'] = []
+        result['quality_warnings'] = []
+        result['price_window_start_utc'] = window.start_utc.isoformat()
+        result['price_window_end_utc'] = history_end.isoformat()
+        batch_books: dict[str, dict[str, Any]] = {}
+        if getattr(args, "batch_clob", True) and token_ids and args.orderbooks:
+            try:
+                batch_books = clob.get_orderbooks(token_ids)
+                result["batch_orderbooks_requested"] = len(token_ids)
+                result["batch_orderbooks_received"] = len(batch_books)
+            except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError, json.JSONDecodeError) as exc:
+                result["source_errors"].append({"source": "clob_batch_books", "error": type(exc).__name__, "message": str(exc)})
+        if not args.skip_prices and not token_ids:
+            result['source_errors'].append({'source':'clob_history','message':'没有可抓取的YES token，历史价格未完成'})
+
+        prior_prices = {}
+        prior_checks = {}
+        force_prices = bool(getattr(args, 'force_prices', False))
+        if not args.skip_prices:
+            cutoff = (captured_at-dt.timedelta(hours=6)).isoformat()
+            for market_id, token_id in outcomes:
+                key = (str(market_id), str(token_id))
+                prior_prices[key] = store.conn.execute(
+                    'select price_time_utc from market_prices where event_slug=? and market_id=? and token_id=? and price_time_utc>=? and price_time_utc<? and resolution_seconds>0 and resolution_seconds<=?',
+                    (slug, market_id, token_id, window.start_utc.isoformat(), history_end.isoformat(), price_fidelity_minutes*60)).fetchall()
+                prior_checks[key] = [(parse_timestamp(r[0]), parse_timestamp(r[1])) for r in store.conn.execute(
+                    'select start_utc,end_utc from history_price_checks where event_slug=? and market_id=? and token_id=? and source_url=? and fidelity=? and checked_at_utc>=?',
+                    (slug, market_id, token_id, data_client.base_url, price_fidelity_minutes, cutoff))]
+
         def fetch_token_data(market_id: Any, token_id: Any) -> dict[str, Any]:
             payload: dict[str, Any] = {"market_id": str(market_id), "token_id": str(token_id)}
             if not args.skip_prices:
                 try:
-                    payload["history"] = clob.get_history(
-                        str(token_id), args.price_interval, args.price_fidelity
-                    )
-                except (urllib.error.URLError, urllib.error.HTTPError, ValueError, json.JSONDecodeError) as exc:
+                    key = (str(market_id), str(token_id))
+                    fetched = data_client.get_history_window(str(token_id), window.start_utc, history_end, price_fidelity_minutes,
+                        known_history=() if force_prices else prior_prices.get(key, ()),
+                        checked=() if force_prices else prior_checks.get(key, ()))
+                    payload["history"] = fetched['history']
+                    payload['history_errors'] = fetched['errors']
+                    payload['history_requests'] = fetched.get('requests', [])
+                    payload['verified_windows'] = fetched.get('verified_windows', [])
+                    payload['history_attempts'] = fetched.get('attempts', [])
+                    payload['cache_used'] = not force_prices and bool(prior_checks.get(key))
+                except (urllib.error.URLError, OSError, ValueError) as exc:
                     payload["price_error"] = str(exc)
             if args.orderbooks:
-                try:
-                    payload["orderbook"] = clob.get_orderbook(str(token_id))
-                except (urllib.error.URLError, urllib.error.HTTPError, ValueError, json.JSONDecodeError) as exc:
-                    payload["orderbook_error"] = str(exc)
+                payload["orderbook"] = batch_books.get(str(token_id))
+                if payload["orderbook"] is None:
+                    try:
+                        payload["orderbook"] = clob.get_orderbook(str(token_id))
+                    except (urllib.error.URLError, urllib.error.HTTPError, ValueError, json.JSONDecodeError) as exc:
+                        payload["orderbook_error"] = str(exc)
             return payload
 
         workers = max(1, min(args.price_workers, len(outcomes) or 1))
+        price_started = time.monotonic()
+        completed_tokens = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             futures = [executor.submit(fetch_token_data, market_id, token_id) for market_id, token_id in outcomes]
             for future in concurrent.futures.as_completed(futures):
                 payload = future.result()
                 if "price_error" in payload:
                     result["price_errors"] += 1
+                    result['source_errors'].append({'source':'clob_history','token_id':payload['token_id'],'message':payload['price_error']})
                 elif "history" in payload:
-                    result["new_price_rows"] += store.save_prices(
-                        slug, payload["market_id"], payload["token_id"], payload["history"]
-                    )
+                    try:
+                        result["new_price_rows"] += store.save_prices(
+                            slug, payload["market_id"], payload["token_id"], payload["history"])
+                    except sqlite3.Error as exc:
+                        failure = dict(stage='storage', error=type(exc).__name__, message=str(exc))
+                        payload.setdefault('history_errors', []).append(failure)
+                        payload['verified_windows'] = []
+                        for attempt in payload.get('history_attempts', []):
+                            attempt.update(status='storage_failed', storage_complete=False,
+                                           finished_at_utc=utc_now().isoformat())
+                            attempt['errors'].append(failure)
+                if not args.skip_prices:
+                    attempts = payload.get('history_attempts', [])
+                    if 'price_error' in payload:
+                        attempts = [dict(start=window.start_utc.isoformat(), end=history_end.isoformat(),
+                            target_seconds=price_fidelity_minutes*60, finished_at_utc=utc_now().isoformat(),
+                            status='failed', pagination_complete=False,
+                            errors=[dict(stage='fetch', message=payload['price_error'])])]
+                    for attempt in attempts:
+                        attempt.setdefault('storage_complete', attempt['status'] == 'ok')
+                    store.save_history_attempts(slug, payload['market_id'], payload['token_id'],
+                                                data_client.base_url, attempts)
+                    result['price_requests'].extend(dict(token_id=payload['token_id'], **r) for r in payload.get('history_requests', []))
+                    # Only save receipts after all returned prices have been committed.
+                    with store.conn:
+                        store.conn.executemany(
+                            'insert or replace into history_price_checks values (?,?,?,?,?,?,?,?)',
+                            [(slug,payload['market_id'],payload['token_id'],data_client.base_url,r['start'],r['end'],price_fidelity_minutes,captured_at.isoformat())
+                             for r in payload.get('verified_windows', [])])
+                    errors = payload.get('history_errors', [])
+                    result['price_errors'] += len(errors)
+                    result['source_errors'].extend({'source':'clob_history','token_id':payload['token_id'],**error} for error in errors)
+                    saved = store.conn.execute('select price_time_utc from market_prices where event_slug=? and market_id=? and token_id=? and price_time_utc>=? and price_time_utc<? and resolution_seconds>0 and resolution_seconds<=?',
+                        (slug,payload['market_id'],payload['token_id'],window.start_utc.isoformat(),history_end.isoformat(),price_fidelity_minutes*60)).fetchall()
+                    seconds = price_fidelity_minutes * 60
+                    expected = max(0, math.ceil((history_end-window.start_utc).total_seconds()/seconds))
+                    buckets = {int((parse_timestamp(row[0])-window.start_utc).total_seconds()//seconds) for row in saved if parse_timestamp(row[0]) is not None}
+                    coverage = dict(token_id=payload['token_id'],market_id=payload['market_id'],expected_buckets=expected,
+                                    covered_buckets=len(buckets),status='complete' if expected>0 and len(buckets)==expected else 'sparse' if buckets else 'empty',
+                                    request_status='failed' if errors or 'price_error' in payload else 'ok',
+                                    request_count=len(payload.get('history_requests', [])), cache_used=payload.get('cache_used',False))
+                    result['price_coverage'].append(coverage)
+                    if coverage['status'] != 'complete':
+                        result['quality_warnings'].append({'source':'clob_history_coverage','token_id':payload['token_id'],
+                            'message':f"价格记录覆盖 {len(buckets)}/{expected} 个{price_fidelity_minutes}分钟区间；{'请求失败，尚待补查' if coverage['request_status']=='failed' else '已核验或复用近期核验，仍有稀疏/空记录'}，未填造价格"})
                 if "orderbook_error" in payload:
                     result["orderbook_errors"] += 1
+                    result['source_errors'].append({'source':'clob_book','token_id':payload['token_id'],'message':payload['orderbook_error']})
                 elif "orderbook" in payload:
                     result["new_orderbook_rows"] += store.save_orderbook(
                         slug, payload["market_id"], payload["token_id"], payload["orderbook"]
                     )
-                if args.request_delay:
-                    time.sleep(args.request_delay)
+                completed_tokens += 1
+                progress = getattr(args, 'history_progress', None)
+                if callable(progress):
+                    progress(dict(completed_tokens=completed_tokens, total_tokens=len(outcomes),
+                                  request_count=len(result['price_requests']), new_price_rows=result['new_price_rows'],
+                                  elapsed_seconds=round(time.monotonic()-price_started,1)))
+        if getattr(args, "public_trades", False):
+            for market in event.get("markets", []):
+                if not isinstance(market, dict):
+                    continue
+                market_id = str(market.get("conditionId") or market.get("condition_id") or "")
+                try:
+                    trades = data_client.get_trades(market_id, limit=int(getattr(args, "trade_limit", 500)))
+                    trades = [row for row in trades if (trade_time := parse_timestamp(row.get('timestamp')))
+                              is not None and window.start_utc <= trade_time < history_end]
+                    result["new_trade_rows"] += store.save_market_trades(slug, market_id, trades, captured_at)
+                except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError, json.JSONDecodeError) as exc:
+                    result["trade_errors"] += 1
+                    result["source_errors"].append({"source": "data_trades", "market_id": market_id, "error": type(exc).__name__, "message": str(exc)})
+        activity = {
+            "volume": event.get("volume"),
+            "volume_24h": event.get("volume24hr") or event.get("volume24h"),
+            "open_interest": event.get("openInterest") or event.get("open_interest"),
+            "liquidity": event.get("liquidity"),
+            "trade_count": result.get("new_trade_rows", 0),
+        }
+        result["market_activity_archive_id"] = store.save_market_activity(
+            slug,
+            activity,
+            captured_at_utc=captured_at,
+        )
+        result["source_age_seconds"].update({"clob": 0, "data_api": 0})
+        result["outcomes"] = [dict(row) for row in store.conn.execute(
+            "select market_id, label, lower_count, upper_count, yes_token_id, no_token_id, outcome_index from market_outcomes where event_slug = ? order by outcome_index",
+            (slug,),
+        ).fetchall()]
+        result['price_quality'] = ('empty' if result['price_coverage'] and all(c['status']=='empty' for c in result['price_coverage'])
+                                   else 'sparse' if result['quality_warnings'] else 'complete')
+        result["status"] = "partial" if result["source_errors"] else result['price_quality']
+        status = result["status"]
+    except Exception as exc:
+        # Keep fatal market/source failures searchable in the append-only
+        # archive before the caller reports the crawl as failed.
+        result["error"] = type(exc).__name__
+        result["error_message"] = str(exc)[:300]
+        result["failure_reason"] = (
+            "market_not_found"
+            if isinstance(exc, urllib.error.HTTPError) and exc.code == 404
+            else "crawl_error"
+        )
+        result["source_errors"].append({
+            "source": "gamma" if isinstance(exc, urllib.error.HTTPError) else "crawl",
+            "error": type(exc).__name__,
+            "message": str(exc)[:300],
+        })
+        raise
     finally:
+        try:
+            store.save_prediction_archive(
+                event_slug=slug,
+                captured_at_utc=captured_at,
+                data_time_utc=parse_timestamp(result.get("data_time_utc")),
+                refresh_status=status,
+                payload=result,
+            )
+        except sqlite3.Error as exc:
+            result["source_errors"].append({"source": "prediction_archive", "error": type(exc).__name__, "message": str(exc)})
         store.close()
     return result
 
@@ -2239,7 +3884,27 @@ def crawl_one(args: argparse.Namespace, slug: str) -> dict[str, Any]:
 def crawl_command(args: argparse.Namespace) -> None:
     slugs = list(args.slug or [])
     if args.start and args.end:
-        slugs.extend(generate_slugs(args.start, args.end, args.timezone, args.anchor))
+        discovered: list[str] = []
+        if getattr(args, "discover", True):
+            try:
+                lower = parse_bound(args.start, args.timezone)
+                upper = parse_bound(args.end, args.timezone)
+                if lower and upper:
+                    discovered = [
+                        str(row.get("slug") or row.get("ticker"))
+                        for row in GammaClient(args.gamma_url, args.timeout, args.proxy).discover_count_events(
+                            lower, upper, args.timezone
+                        )
+                        if row.get("slug") or row.get("ticker")
+                    ]
+            except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError, json.JSONDecodeError) as exc:
+                print(json.dumps({"discovery_error": type(exc).__name__, "message": str(exc)}, ensure_ascii=False), file=sys.stderr, flush=True)
+        if discovered:
+            slugs.extend(discovered)
+        elif getattr(args, "discover", True):
+            raise SystemExit("Gamma 市场发现失败或日期范围内没有真实市场；未生成日期拼接 slug")
+        else:
+            slugs.extend(generate_slugs(args.start, args.end, args.timezone, args.anchor))
     if not slugs:
         raise SystemExit("Provide --slug one or more times, or both --start and --end.")
     for slug in dict.fromkeys(slugs):
@@ -2388,6 +4053,50 @@ def predict_command(args: argparse.Namespace) -> None:
         store.close()
 
 
+def archive_command(args: argparse.Namespace) -> None:
+    store = MarketStore(Path(args.db))
+    try:
+        inserted = store.backfill_prediction_archive(args.limit)
+        print(json.dumps({
+            "archive_schema": "prediction_archive_v1",
+            "inserted": inserted,
+            "do_not_auto_trade": True,
+        }, ensure_ascii=False, indent=2, sort_keys=True))
+    finally:
+        store.close()
+
+
+def discover_live_command(args: argparse.Namespace) -> None:
+    """Print currently overlapping real Elon Musk count-market slugs.
+
+    This is intentionally read-only and is used by the local launcher so it
+    never has to manufacture a slug from a calendar date.
+    """
+    now = utc_now()
+    from live_market_time import live_event_window
+    candidates = GammaClient(args.gamma_url, args.timeout, args.proxy).discover_count_events(
+        now - dt.timedelta(days=args.lookback_days),
+        now + dt.timedelta(days=args.lookahead_days),
+        args.timezone,
+        max_pages=args.max_pages,
+    )
+    live: list[tuple[dt.datetime, str]] = []
+    for event in candidates:
+        start, end = live_event_window(event, args.timezone)
+        slug = str(event.get("slug") or event.get("ticker") or "").strip()
+        if not slug or start is None or end is None or start > now or end <= now:
+            continue
+        live.append((start, slug))
+    live.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    payload = {
+        "as_of_utc": now.isoformat(),
+        "slugs": list(dict.fromkeys(slug for _, slug in live)),
+        "count": len(live),
+        "do_not_auto_trade": True,
+    }
+    print(json.dumps(payload, ensure_ascii=False))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Crawl Polymarket tweet-count markets and train a ridge regression.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -2402,11 +4111,15 @@ def build_parser() -> argparse.ArgumentParser:
     crawl.add_argument("--timezone", default=DEFAULT_TZ)
     crawl.add_argument("--gamma-url", default=DEFAULT_GAMMA_URL)
     crawl.add_argument("--clob-url", default=DEFAULT_CLOB_URL)
+    crawl.add_argument("--data-url", default="https://data-api.polymarket.com", help="Public Data API base URL; no credentials are used.")
     crawl.add_argument("--tracker-url", default="https://xtracker.polymarket.com")
     crawl.add_argument("--proxy", default=DEFAULT_PROXY, help="HTTP proxy, e.g. http://127.0.0.1:7890.")
     crawl.add_argument("--timeout", type=int, default=30)
     crawl.add_argument("--price-interval", default="1w", choices=("1d", "1w", "1m", "max"))
-    crawl.add_argument("--price-fidelity", type=int, default=60)
+    crawl.add_argument(
+        "--price-fidelity", type=int, default=5,
+        help="Price-history sampling fidelity in minutes (default: 5).",
+    )
     crawl.add_argument(
         "--skip-prices",
         action="store_true",
@@ -2417,9 +4130,35 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Capture current CLOB order books and best bid/ask/depth snapshots.",
     )
+    crawl.add_argument("--no-batch-clob", action="store_false", dest="batch_clob", help="Disable public CLOB batch requests.")
+    crawl.add_argument("--no-discover", action="store_false", dest="discover", help="Use generated slugs instead of Gamma discovery for date ranges.")
+    crawl.add_argument("--public-trades", action="store_true", help="Save public market trades from the Data API.")
+    crawl.add_argument("--trade-limit", type=int, default=500)
     crawl.add_argument("--request-delay", type=float, default=0.1)
     crawl.add_argument("--price-workers", type=int, default=4)
-    crawl.set_defaults(func=crawl_command)
+    crawl.add_argument("--force-prices", action="store_true", help="Ignore recent successful history checks and recheck the full price window.")
+    crawl.set_defaults(func=crawl_command, batch_clob=True, discover=True)
+
+    archive = subparsers.add_parser(
+        "archive",
+        help="Build the append-only frontend-ready prediction archive from existing paper forecasts.",
+    )
+    archive.add_argument("--db", default=DEFAULT_DB)
+    archive.add_argument("--limit", type=int, help="Optional maximum number of source forecasts to inspect.")
+    archive.set_defaults(func=lambda args: archive_command(args))
+
+    discover_live = subparsers.add_parser(
+        "discover-live",
+        help="Read-only discovery of currently overlapping real Elon count-market slugs.",
+    )
+    discover_live.add_argument("--timezone", default=DEFAULT_TZ)
+    discover_live.add_argument("--gamma-url", default=DEFAULT_GAMMA_URL)
+    discover_live.add_argument("--proxy", default=DEFAULT_PROXY)
+    discover_live.add_argument("--timeout", type=int, default=20)
+    discover_live.add_argument("--lookback-days", type=int, default=8)
+    discover_live.add_argument("--lookahead-days", type=int, default=8)
+    discover_live.add_argument("--max-pages", type=int, default=20)
+    discover_live.set_defaults(func=discover_live_command)
 
     ingest_events = subparsers.add_parser(
         "ingest-events",
@@ -2483,7 +4222,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     hourly_test = subparsers.add_parser(
         "hourly-test",
-        help="Walk forward through local ended markets and write one prediction per hour.",
+        help="Walk forward through local ended markets and write a time-aligned backtest record.",
     )
     hourly_test.add_argument("--db", default=DEFAULT_DB)
     hourly_test.add_argument("--slug", action="append", help="Limit testing to one or more stored market slugs.")
@@ -2497,10 +4236,21 @@ def build_parser() -> argparse.ArgumentParser:
     hourly_test.add_argument("--platform", default=DEFAULT_PLATFORM)
     hourly_test.add_argument("--timezone", default=DEFAULT_TZ)
     hourly_test.add_argument("--min-elapsed-hours", type=float, default=1)
+    hourly_test.add_argument(
+        "--min-elapsed-minutes", type=float,
+        help="Minimum elapsed time before the first checkpoint; overrides --min-elapsed-hours.",
+    )
+    hourly_test.add_argument(
+        "--step-minutes", type=float, default=60,
+        help="Sliding checkpoint interval in minutes; 5 is suitable for high-resolution local replay.",
+    )
     hourly_test.add_argument("--training-step-hours", type=float, default=12)
     hourly_test.add_argument("--training-min-elapsed-hours", type=float, default=12)
     hourly_test.add_argument("--min-final-count", type=int, default=1)
     hourly_test.add_argument("--max-price-age-hours", type=float, default=24)
+    hourly_test.add_argument("--backtest-min-edge", type=float, default=0.08)
+    hourly_test.add_argument("--backtest-max-spread", type=float, default=0.04)
+    hourly_test.add_argument("--backtest-min-depth", type=float, default=3.0)
     hourly_test.add_argument("--ridge", type=float, default=10.0)
     hourly_test.add_argument(
         "--allow-unverified-history",

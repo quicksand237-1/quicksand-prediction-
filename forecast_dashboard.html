@@ -31,6 +31,9 @@
     }
     button, input, select { font: inherit; }
     button { cursor: pointer; }
+    #paperPane input { min-height:36px; padding:7px; border:1px solid var(--line); border-radius:4px; max-width:100%; }
+    .paper-controls { display:flex; flex-wrap:wrap; gap:12px; align-items:end; padding:12px 0; border-bottom:1px solid var(--line); }
+    .paper-navigation { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0; }
     .shell { max-width: 1440px; margin: 0 auto; padding: 22px; }
     .topbar {
       display: flex;
@@ -140,6 +143,30 @@
       background: var(--accent-soft);
     }
     .mode-note { color: var(--muted); margin-left: 4px; }
+    .section-nav {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      padding: 8px 0;
+      margin-bottom: 12px;
+      background: var(--bg);
+      border-bottom: 1px solid var(--line);
+    }
+    .section-nav a {
+      padding: 5px 9px;
+      color: var(--muted);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      text-decoration: none;
+      font-size: 12px;
+    }
+    .section-nav a:hover, .section-nav a:focus { color: var(--accent); border-color: var(--accent); }
+    .anchor-target { display: block; height: 0; scroll-margin-top: 16px; }
+    [id] { scroll-margin-top: 54px; }
     .grid {
       display: grid;
       grid-template-columns: minmax(0, 1.7fr) minmax(320px, 1fr);
@@ -302,8 +329,23 @@
     .live-list-item a { color: var(--accent); text-decoration: none; }
     .live-list-meta { color: var(--muted); font-size: 11px; margin-top: 3px; }
     .live-table-wrap { max-height: 320px; overflow: auto; }
-    .chart-wrap { margin-top: 12px; }
+    .chart-wrap { position: relative; margin-top: 12px; }
     #historyChart, #residualChart, #globalResidualChart { display: block; width: 100%; height: 280px; background: #fbfcfd; border: 1px solid var(--line); }
+    .chart-tooltip {
+      position: absolute;
+      z-index: 2;
+      max-width: min(360px, calc(100% - 16px));
+      padding: 8px 10px;
+      color: #fff;
+      background: #18212b;
+      border: 1px solid #344553;
+      border-radius: 4px;
+      box-shadow: 0 3px 12px rgba(23, 43, 60, 0.2);
+      font-size: 12px;
+      line-height: 1.45;
+      white-space: pre-line;
+      pointer-events: none;
+    }
     .chart-legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 8px; font-size: 12px; color: var(--muted); }
     .legend-prediction::before, .legend-current::before, .legend-actual::before, .legend-residual-high::before, .legend-residual-low::before, .legend-residual-zero::before { content: ""; display: inline-block; width: 18px; height: 3px; margin: 0 5px 3px 0; }
     .legend-prediction::before { background: #1e6fa8; }
@@ -325,6 +367,33 @@
       background: var(--good-soft);
     }
     .live-recommendation strong { display: block; font-size: 18px; }
+    .analysis-controls {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 9px;
+      align-items: end;
+    }
+    .analysis-controls label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
+    .analysis-controls select, .analysis-controls input { width: 100%; box-sizing: border-box; }
+    .archive-summary { margin-top: 10px; color: var(--muted); font-size: 12px; }
+    .info-tip {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 18px;
+      height: 18px;
+      margin-left: 5px;
+      border: 1px solid #9aa9b8;
+      border-radius: 50%;
+      color: #5c7184;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: help;
+      vertical-align: middle;
+    }
+    .backtest-extra { margin-top: 10px; padding: 8px 10px; border: 1px solid var(--line); background: #fbfcfd; }
+    .backtest-extra summary { cursor: pointer; color: var(--accent); font-size: 12px; font-weight: 600; }
+    .backtest-extra[open] summary { margin-bottom: 8px; }
     @media (max-width: 980px) {
       .toolbar, .live-toolbar { grid-template-columns: 1fr 1fr; }
       .grid { grid-template-columns: 1fr; }
@@ -338,6 +407,7 @@
       .toolbar .button { width: 100%; }
       .live-toolbar .button { width: 100%; }
       .metrics .metric:first-child { grid-column: span 2; }
+      .analysis-controls { grid-template-columns: 1fr; }
     }
     .ai-toolbar { display: grid; gap: 12px; margin: 18px 0; padding: 16px; border: 1px solid var(--line, #d8dee8); background: var(--panel, #fff); }
     .ai-toolbar-grid { display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)); gap: 10px; align-items: end; }
@@ -346,6 +416,21 @@
     .ai-note { margin: 0; color: #637083; font-size: 0.88rem; }
     .ai-output { white-space: pre-wrap; min-height: 72px; max-height: 360px; overflow: auto; margin: 0; padding: 12px; background: #f6f8fb; border: 1px solid var(--line, #d8dee8); }
     @media (max-width: 760px) { .ai-toolbar-grid { grid-template-columns: 1fr; } }
+    #workspace .panel { border: 0; box-shadow: none; background: transparent; }
+    #workspace .grid { display: block; }
+    #workspace { min-width: 0; }
+    #workspace .analysis-controls { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+    #workspace .modebar { flex-wrap: wrap; }
+    #workspace .timeline-line { flex-wrap: wrap; gap: 8px; }
+    #workspace .market-meta, #workspace .archive-summary, #workspace .signal-value { overflow-wrap: anywhere; }
+    #workspace [role="tab"][aria-selected="true"] { background: #176b52; color: white; }
+    #paperPane h3 { margin-top: 24px; }
+    .chart-tooltip { white-space: pre-line; overflow-wrap: anywhere; pointer-events: none; }
+    @media (max-width: 600px) {
+      #workspace .analysis-controls { grid-template-columns: 1fr; }
+      #workspace .timeline-line { font-size: 11px; }
+      #workspace .panel-header { flex-wrap: wrap; }
+    }
   </style>
 </head>
 <body>
@@ -358,13 +443,37 @@
       <div class="status"><span id="statusDot" class="status-dot"></span><span id="statusText">等待本地服务读取固定复盘</span></div>
     </header>
 
-    <section class="toolbar" aria-label="固定本地复盘">
+    <nav class="section-nav" aria-label="功能分区">
+      <a href="#live-capture">实时采集</a>
+      <a href="#history-acquisition">历史抓取</a>
+      <a href="#prediction-review">预测复盘</a>
+      <a href="#paper-research">纸面研究</a>
+      <a href="#diagnostics">诊断</a>
+      <a href="#backtest">回测</a>
+      <a href="#data-organization">数据整理</a>
+      <a href="#local-reports">本地文件</a>
+    </nav>
+
+    <span id="local-reports" class="anchor-target" aria-hidden="true"></span>
+    <section id="controlSection" class="toolbar" aria-label="固定本地复盘">
       <button id="loadFixedPublicButton" class="button" type="button">刷新固定公开复盘</button>
       <button id="loadFixedPrivateButton" class="button secondary" type="button">载入固定私有结算与汇总</button>
+      <button id="clearBrowserCacheButton" class="button secondary" type="button">清除浏览器历史缓存</button>
       <span id="localReportStatus" class="live-status">等待本地服务生成或读取固定复盘</span>
+      <span class="live-status">仅清理带有 aiprp: 或 aiprp- 命名空间的浏览器缓存；不会删除 SQLite、CSV、JSONL、订单簿、原始帖子或模型文件。</span>
     </section>
 
-    <section class="live-toolbar" aria-label="实时数据">
+    <span id="data-organization" class="anchor-target" aria-hidden="true"></span>
+    <section id="dataSection" class="toolbar" aria-label="本地数据整理">
+      <button id="scanDataFilesButton" class="button secondary" type="button">扫描本地重复数据文件</button>
+      <button id="consolidateDataFilesButton" class="button" type="button">生成合并副本（不删除原件）</button>
+      <button id="deleteDuplicateDataFilesButton" class="button secondary" type="button">删除已确认的完全重复副本</button>
+      <span id="dataOrganizerStatus" class="live-status">尚未扫描 data/；仅允许删除哈希完全相同且低风险的文本副本</span>
+      <details><summary>查看数据整理清单</summary><pre id="dataOrganizerDetail" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow:auto"></pre></details>
+    </section>
+
+    <span id="live-capture" class="anchor-target" aria-hidden="true"></span>
+    <section id="liveSection" class="live-toolbar" aria-label="实时数据">
       <label>
         实时服务地址
         <input id="liveUrl" value="http://127.0.0.1:8765/api/live" spellcheck="false">
@@ -376,23 +485,27 @@
         </select>
       </label>
       <label>
-        刷新间隔
+        正式归档间隔
         <select id="liveInterval">
-          <option value="10">10 秒</option>
-          <option value="30" selected>30 秒</option>
-          <option value="60">60 秒</option>
+          <option value="300" selected>5 分钟</option>
+          <option value="600">10 分钟</option>
+          <option value="900">15 分钟</option>
         </select>
       </label>
       <button id="startLiveButton" class="button" type="button">开始实时监控</button>
       <button id="stopLiveButton" class="button secondary" type="button" disabled>停止</button>
+      <button id="researchCaptureNowButton" class="button secondary" type="button">立即研究采样</button>
       <span id="liveStatus" class="live-status">未连接本地实时服务</span>
+      <span id="liveRecordingStatus" class="live-status">等待记录状态</span>
+      <span id="researchCaptureStatus" class="live-status">研究采样：等待后端状态</span>
     </section>
 
-    <section class="ai-toolbar" aria-label="historical market sync">
+    <span id="history-acquisition" class="anchor-target" aria-hidden="true"></span>
+    <section id="historySyncSection" class="ai-toolbar" aria-label="historical market sync">
       <div class="panel-header">
         <div>
           <h2>历史市场自动抓取</h2>
-          <p class="ai-note">仅在点击后顺序补充历史市场元数据和发推计数。历史订单簿无法可靠回放；固定复盘会在生成前备份旧文件，不会重训模型。</p>
+          <p class="ai-note">仅在点击后顺序补充历史市场元数据和发推计数；勾选赔率后按 5 分钟采样抓取 CLOB 历史价格。历史订单簿只能保存采集时快照，不能凭空还原过去盘口。</p>
         </div>
         <span id="historySyncStatus" class="badge neutral">未启动</span>
       </div>
@@ -400,14 +513,23 @@
         <label>开始日期
           <input id="historyStartDate" type="date" value="2026-02-10">
         </label>
-        <label>结束日期（不含当天）
+        <label>结束日期（不含当天；跨时区可到次日）
           <input id="historyEndDate" type="date">
         </label>
-        <label>赔率历史间隔
-          <select id="historyPriceInterval"><option value="1d" selected>1 天</option><option value="1w">1 周</option><option value="1m">1 月</option><option value="max">最大可用</option></select>
+        <label>历史价格范围
+          <select id="historyPriceInterval"><option value="max">目标市场完整起止区间（增量补缺）</option></select>
+        </label>
+        <label>研究时间步长
+          <select id="historyPriceFidelity"><option value="60">1 小时 · 实验收益研究（优先）</option><option value="5">5 分钟 · 模拟研究</option></select>
         </label>
         <label>历史赔率
-          <input id="historyIncludePrices" type="checkbox"> 同时抓取（慢）
+          <input id="historyIncludePrices" type="checkbox" checked> 补抓历史价格（保留实际来源精度）
+        </label>
+        <label>重新核验
+          <input id="historyForcePrices" type="checkbox"> 忽略近期缓存，重新请求全部价格
+        </label>
+        <label>当前订单簿
+          <input id="historyIncludeOrderbooks" type="checkbox"> 从现在起追加快照（不恢复历史）
         </label>
         <label>固定复盘
           <input id="historyRebuildReports" type="checkbox" checked> 抓取后生成三份固定 CSV
@@ -415,11 +537,12 @@
       </div>
       <div class="ai-actions">
         <button id="startHistorySyncButton" class="button" type="button">开始历史抓取</button>
-        <span id="historySyncDetail" class="live-status">默认不抓取赔率；抓取后会更新固定复盘，旧文件将备份。</span>
+        <span id="historySyncDetail" class="live-status">默认优先补齐一小时研究数据；官方分页接口自动回退至可用精度，不填造价格。历史价格研究不代表订单簿成交。</span>
+        <details><summary>逐市场价格覆盖与失败明细</summary><pre id="historyCoverageDetail" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow:auto"></pre></details>
       </div>
     </section>
 
-    <section class="ai-toolbar" aria-label="AI assistant settings">
+    <section id="research-assistant" class="ai-toolbar" aria-label="AI assistant settings">
       <div class="panel-header">
         <div>
           <h2>AI 辅助分析</h2>
@@ -457,7 +580,7 @@
       </div>
     </section>
 
-    <section class="panel" aria-label="AI analysis result">
+    <section id="research-output" class="panel" aria-label="AI analysis result">
       <div class="panel-header"><h2>AI 分析结果</h2><span class="badge neutral">仅供本地研究</span></div>
       <pre id="aiOutput" class="ai-output">尚未执行 AI 分析。</pre>
     </section>
@@ -484,6 +607,16 @@
             <div class="live-metric"><span class="metric-label">XTracker 刷新年龄</span><strong id="liveTrackerAge">-</strong></div>
             <div class="live-metric"><span class="metric-label">模型预测结算数（期望值）</span><strong id="liveForecastCount">-</strong></div>
             <div class="live-metric"><span class="metric-label">盘口隐含期望</span><strong id="liveMarketExpected">-</strong></div>
+          </div>
+          <div class="section">
+            <h3>市场变化研究特征</h3>
+            <div class="signal">
+              <div class="signal-row"><span class="signal-key">开盘后分钟</span><span id="liveDynamicsElapsed" class="signal-value">-</span></div>
+              <div class="signal-row"><span class="signal-key">近5/15分钟发帖</span><span id="liveDynamicsPosts" class="signal-value">-</span></div>
+              <div class="signal-row"><span class="signal-key">发帖速率变化</span><span id="liveDynamicsAcceleration" class="signal-value">-</span></div>
+              <div class="signal-row"><span class="signal-key">模型-市场预期差</span><span id="liveDynamicsGap" class="signal-value">-</span></div>
+              <div class="signal-row"><span class="signal-key">来源年龄</span><span id="liveDynamicsAge" class="signal-value">-</span></div>
+            </div>
           </div>
           <div class="section">
             <div id="liveRecommendation" class="live-recommendation">
@@ -534,25 +667,54 @@
       </div>
     </section>
 
-    <section id="workspace" class="hidden">
+    <span id="prediction-review" class="anchor-target" aria-hidden="true"></span>
+    <section id="workspace">
+      <div class="analysis-controls">
+        <label>开始日期 <input id="backtestStart" type="date"></label>
+        <label>结束日期（不含当天） <input id="backtestEnd" type="date"></label>
+        <label>市场 <select id="marketSelect"></select></label>
+        <button id="loadBacktestButton" class="button" type="button">读取数据</button>
+        <button id="fullMarketRangeButton" class="button" type="button">完整市场范围</button>
+      </div>
+        <details class="archive-summary">
+          <summary>高级范围与采样设置（默认无需修改）</summary>
+          <div class="analysis-controls">
+            <label>检查点步长 <select id="backtestStep" disabled><option value="5" selected>5 分钟</option></select></label>
+            <label>首个检查点 <select id="backtestMinElapsed" disabled><option value="5" selected>市场开始后 5 分钟</option></select></label>
+            <label>最多显示记录 <input id="backtestLimit" type="number" min="1" max="10000" value="10000"></label>
+          </div>
+        </details>
+
+      <div id="workspaceStatus" class="archive-summary">请选择市场并读取数据。</div>
+      <div id="sharedTimeline">
+          <div class="timeline">
+            <div class="timeline-line">
+              <span id="timelineStart">-</span>
+              <span id="timelineCursor">-</span>
+              <span id="timelineEnd">-</span>
+            </div>
+            <input id="hourSlider" type="range" min="0" max="0" value="0" step="1" disabled>
+          </div>
+
+      </div>
+      <div class="modebar" role="tablist" aria-label="历史工作区">
+        <button class="button secondary" id="predictionTab" role="tab" aria-selected="true" aria-controls="predictionPane">预测与行情</button>
+        <button class="button secondary" id="paperTab" role="tab" aria-selected="false" aria-controls="paperPane">纸面交易</button>
+        <button class="button secondary" id="diagnosticTab" role="tab" aria-selected="false" aria-controls="diagnosticPane">评分与诊断</button>
+      </div>
       <div class="modebar">
-        <button id="guessMode" class="mode-button active" type="button">竞猜模式</button>
-        <button id="reviewMode" class="mode-button" type="button">复盘模式</button>
         <button id="revealButton" class="button secondary" type="button">揭晓结算</button>
-        <span id="modeNote" class="mode-note">实际结算值已锁定</span>
+        <span id="modeNote" class="mode-note">统一历史回测与复盘；实际结算值已锁定</span>
       </div>
 
+      <div id="predictionPane" role="tabpanel">
       <div class="grid">
         <section class="panel">
           <div class="panel-header">
             <div>
-              <h2>当前盘口</h2>
+              <h2>历史检查点</h2>
               <div id="marketMeta" class="market-meta">-</div>
             </div>
-            <label style="min-width: 250px;">
-              选择市场
-              <select id="marketSelect"></select>
-            </label>
           </div>
 
           <div class="metrics">
@@ -561,7 +723,7 @@
               <div id="currentCount" class="metric-value">-</div>
             </div>
             <div class="metric">
-              <div class="metric-label">已过小时</div>
+            <div class="metric-label">已过时间</div>
               <div id="elapsedHours" class="metric-value">-</div>
             </div>
             <div class="metric">
@@ -574,17 +736,8 @@
             </div>
           </div>
 
-          <div class="timeline">
-            <div class="timeline-line">
-              <span id="timelineStart">-</span>
-              <span id="timelineCursor">-</span>
-              <span id="timelineEnd">-</span>
-            </div>
-            <input id="hourSlider" type="range" min="0" max="0" value="0" step="1">
-          </div>
-
           <div class="guess-box">
-            <div class="guess-title">本小时的猜谜结论</div>
+            <div class="guess-title">当前 5 分钟区间的竞猜结论</div>
             <div id="guessMain" class="guess-main">等待数据</div>
             <div id="guessDetail" class="guess-detail">模型会随着选择的小时和市场变化。</div>
           </div>
@@ -593,7 +746,7 @@
             <h3>完整结算区间概率</h3>
             <div class="live-table-wrap">
               <table>
-                <thead><tr><th>结算区间</th><th>模型概率</th></tr></thead>
+                <thead><tr><th>结算区间</th><th>模型概率</th><th>市场隐含概率</th><th>模型-盘口</th></tr></thead>
                 <tbody id="binProbabilityBody"></tbody>
               </table>
             </div>
@@ -608,11 +761,66 @@
             </div>
           </div>
 
+          <div class="section">
+            <h3>当前 5 分钟区间的历史价格与订单簿</h3>
+            <div id="historyMarketNote" class="market-meta">正在读取本地历史行情及采集记录。</div>
+            <div class="live-table-wrap">
+              <table>
+                <thead><tr><th>结果区间</th><th>模型概率</th><th>市场隐含概率</th><th>历史价格</th><th>最佳买 / 卖</th><th>价差</th><th>买 / 卖深度</th><th>edge / 成本后 edge</th></tr></thead>
+                <tbody id="historyMarketBody"><tr><td colspan="8">选择市场后读取</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+
+        </section>
+      </div>
+      </div>
+      <span id="paper-research" class="anchor-target" aria-hidden="true"></span>
+      <section id="paperPane" role="tabpanel" class="hidden">
+        <h2>纸面交易 · 汇总深度模拟</h2>
+        <div class="paper-controls">
+          <label>模式 <select id="paperMode"><option value="mandatory_entry">指定节点强制建仓</option><option value="legacy">原策略对照</option></select></label>
+          <label>市场开始后（小时） <input id="paperEntryTime" type="number" min="0" step="any" value="0" style="width:110px"></label>
+          <label>再等（分钟） <input id="paperEntryMinutes" type="number" min="0" max="59" step="1" value="0" style="width:80px"></label>
+          <label>退出管理 <select id="paperExitPolicy"><option value="managed">止盈 / 止损 / 策略退出</option><option value="hold_to_settlement">关闭退出管理：买入后持有至结算</option></select></label>
+          <button id="paperUseCurrent" class="button secondary" type="button">使用当前节点</button>
+          <label>概率覆盖 % <input id="paperCoverage" type="number" min="1" max="100" value="80" style="width:80px"></label>
+          <label>资金份数 <input id="paperCapital" type="number" min="1" value="100" style="width:90px"></label>
+          <label>止盈 % <input id="paperTakeProfit" type="number" min="0.1" step="0.1" value="20" style="width:80px"></label>
+          <label>止损 % <input id="paperStopLoss" type="number" min="0.1" max="100" step="0.1" value="15" style="width:80px"></label>
+          <button id="paperRerun" class="button" type="button">重新模拟</button>
+        </div>
+        <div id="paperPortfolio" class="archive-summary"></div>
+        <div class="paper-navigation"><button id="paperFirstFill" class="button secondary" type="button">首笔成交</button> <button id="paperPreviousFill" class="button secondary" type="button">上一笔成交</button> <button id="paperNextFill" class="button secondary" type="button">下一笔成交</button></div>
+        <div id="paperStatus" class="archive-summary">尚未读取</div>
+        <div class="table-wrap"><table><thead><tr><th>结果区间</th><th>买卖方向 / 状态</th><th>本次成交份数</th><th>当前持仓</th><th>累计已实现盈亏</th><th>未实现盈亏</th></tr></thead><tbody id="paperPositionBody"></tbody></table></div>
+        <h3>截至当前检查点的已成交纸面交易</h3>
+        <div id="paperHistoryNote" class="market-meta"></div>
+        <div class="table-wrap"><table><thead><tr><th>检查点</th><th>结果区间</th><th>方向 / 状态</th><th>成交份数 / 请求</th><th>成交后持仓</th><th>净单价 / 成本</th><th>手续费</th><th>现金流</th><th>本笔盈亏</th><th>累计盈亏</th><th>卖出收益率</th><th>触发原因</th></tr></thead><tbody id="paperActionBody"></tbody></table></div>
+        <div id="paperSettlement" class="archive-summary"></div>
+        <h3>同一建仓时长 · 全历史持有至结算统计</h3>
+        <button id="paperAllRun" class="button" type="button">统计全部历史市场</button>
+        <div id="paperAllStatus" class="archive-summary">选择持有至结算并读取数据后自动统计。</div>
+        <div class="table-wrap"><table><thead><tr><th>历史市场</th><th>状态 / 实际建仓</th><th>实际投入</th><th>结算盈亏</th><th>投入回报率</th></tr></thead><tbody id="paperAllBody"></tbody></table></div>
+        <h3>建仓时间 × 概率覆盖 · 风险调整研究</h3>
+        <div class="analysis-controls">
+          <label>建仓分钟（逗号分隔）<input id="paperGridEntries" type="text" value="0,30,60,90,120,150,180,210,240,270,300,330,360" style="width:260px"></label>
+          <label>覆盖比例（逗号分隔）<input id="paperGridCoverage" type="text" value="center,30%,50%,70%,80%,100%" style="width:220px"></label>
+          <label>每市场预算 <input id="paperGridBudget" type="number" min="0.01" step="0.01" value="100" style="width:100px"></label>
+          <button id="paperGridRun" class="button" type="button">运行网格研究</button>
+        </div>
+        <div id="paperGridStatus" class="archive-summary">仅在点击后运行；最多 64 个组合，使用本地只读历史回放。</div>
+        <div class="table-wrap"><table><thead><tr><th>建仓 / 覆盖</th><th>风险调整分数</th><th>投入收益率</th><th>最大回撤</th><th>成交且结算</th><th>共享资金池收益率</th></tr></thead><tbody id="paperGridBody"></tbody></table></div>
+        <div id="paperGridWalkForward" class="archive-summary"></div>
+      </section>
+      <span id="diagnostics" class="anchor-target" aria-hidden="true"></span>
+      <div id="diagnosticPane" role="tabpanel" class="hidden">
+        <div id="checkpointDiagnostics" class="archive-summary">尚未读取</div>
           <div id="residualSection" class="section hidden">
             <h3>回溯预测与官方结算的残差</h3>
             <div class="chart-wrap">
               <canvas id="residualChart" height="280"></canvas>
-              <div class="chart-legend"><span class="legend-residual-high">正残差：模型高估</span><span class="legend-residual-low">负残差：模型低估</span><span class="legend-residual-zero">零残差</span></div>
+              <div class="chart-legend"><span style="color:#b33a3a">红实线：预测 − 本地最终观测</span><span style="color:#9a6500">橙虚线：预测 − 官方区间中点代理</span><span>正值高估，负值低估；零线表示一致</span></div>
               <div id="residualNote" class="market-meta">揭晓结算后显示。</div>
             </div>
           </div>
@@ -625,10 +833,10 @@
               <div class="review-value"><span class="metric-label">官方结算区间</span><strong id="resolvedBin">-</strong></div>
               <div class="review-value"><span class="metric-label">预测绝对误差</span><strong id="absoluteError">-</strong></div>
               <div class="review-value"><span class="metric-label">是否落入官方区间</span><strong id="binHit">-</strong></div>
+              <div class="review-value"><span class="metric-label">当前检查点 Brier</span><strong id="checkpointBrier">-</strong></div>
+              <div class="review-value"><span class="metric-label">当前检查点 Log Loss</span><strong id="checkpointLogLoss">-</strong></div>
             </div>
           </div>
-        </section>
-
         <aside class="panel">
           <div class="panel-header">
             <h2>方向与风险</h2>
@@ -641,18 +849,35 @@
             <div class="signal-row"><span class="signal-key">盘口概率质量</span><span id="priceMass" class="signal-value">-</span></div>
             <div class="signal-row"><span class="signal-key">训练市场数</span><span id="trainingWindows" class="signal-value">-</span></div>
             <div class="signal-row"><span class="signal-key">数据建议</span><span id="riskDecision" class="signal-value">-</span></div>
+            <div class="signal-row"><span class="signal-key">检查点步长</span><span id="backtestRecordStep" class="signal-value">-</span></div>
+            <div class="signal-row"><span class="signal-key">价格快照年龄</span><span id="priceSnapshotAge" class="signal-value">-</span></div>
+            <div class="signal-row"><span class="signal-key">盘口快照年龄</span><span id="bookSnapshotAge" class="signal-value">-</span></div>
+            <div class="signal-row"><span class="signal-key">回测决策状态</span><span id="backtestDecision" class="signal-value">-</span></div>
           </div>
           <div class="section">
             <h3>获利能力边界</h3>
-            <p>当前 CSV 没有逐区间可成交 bid/ask、手续费、深度和滑点，因此这里只给出方向与优势代理，不计算真实 PnL。真实下注前必须接入可成交价格和风险限额。</p>
+            <p>纸面盈亏来自历史安全盘口的汇总深度模拟，不代表真实成交或盈利。CSV 缺少持仓动作时不计算纸面盈亏；缺少安全盘口或估值时分别标记缺失。</p>
           </div>
           <div class="section">
             <h3>输入兼容</h3>
             <p>页面按列名读取数据。新增列会被忽略，缺失的可选列显示为“-”；核心列为 `slug`、`checkpoint_utc`、`current_count`、`model_forecast_final_count`。</p>
           </div>
+          <div class="section">
+            <h3>时间衰减敏感性</h3>
+            <p>仅对已结束且在所选市场开始前可用的本地历史预测参考记录加权；不重训、不校准、不修改当前预测或决策。</p>
+            <div class="analysis-controls">
+              <label>半衰期
+                <select id="timeDecayHalfLife"><option value="0">不启用（等权）</option><option value="7">7 天</option><option value="30" selected>30 天</option><option value="90">90 天</option><option value="180">180 天</option></select>
+              </label>
+              <label>最大参考年龄
+                <select id="timeDecayMaxAge"><option value="30">30 天</option><option value="90">90 天</option><option value="180">180 天</option><option value="365" selected>365 天</option></select>
+              </label>
+              <button id="refreshTimeDecayButton" class="button secondary" type="button">更新敏感性</button>
+            </div>
+            <div id="timeDecayStatus" class="archive-summary">选择一个复盘市场后读取本地归档。</div>
+          </div>
         </aside>
-      </div>
-
+      <span id="settlement-metrics" class="anchor-target" aria-hidden="true"></span>
       <section class="panel section">
         <div class="panel-header">
           <div>
@@ -670,21 +895,49 @@
             <div class="review-value"><span class="metric-label">Brier 分数</span><strong id="overallBrier">-</strong></div>
             <div class="review-value"><span class="metric-label">LogLoss</span><strong id="overallLogLoss">-</strong></div>
           </div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>市场</th><th>小时数</th><th>MAE</th><th>官方区间</th><th>本地观测</th><th>质量</th></tr></thead>
-              <tbody id="summaryBody"></tbody>
-            </table>
-          </div>
           <div class="chart-wrap">
             <h3>全局结算预测残差</h3>
             <canvas id="globalResidualChart" height="280"></canvas>
+            <div id="globalResidualTooltip" class="chart-tooltip hidden" role="status"></div>
             <div class="chart-legend"><span class="legend-global-actual">实线：最终预测 - 本地最终观测</span><span class="legend-global-midpoint">虚线：最终预测 - 官方区间中点代理</span></div>
             <div id="globalResidualNote" class="market-meta">揭晓结算后显示全部已结算市场。</div>
           </div>
+          <details id="settlementDetails" class="section">
+            <summary>分市场结算细则</summary>
+            <div class="table-wrap" style="max-height: 360px; overflow: auto;">
+              <table>
+                <thead><tr><th>市场</th><th>检查点数</th><th>MAE</th><th>官方区间</th><th>本地观测</th><th>质量</th></tr></thead>
+                <tbody id="summaryBody"></tbody>
+              </table>
+            </div>
+          </details>
         </div>
       </section>
-      <p class="footer-note">这是研究和模拟工具，不构成投资建议。历史回放使用的本地帖子可能不完整，尤其不能自动还原被删除帖子。</p>
+      <span id="backtest" class="anchor-target" aria-hidden="true"></span>
+      <section class="panel section" id="backtestSection">
+        <span class="info-tip" title="只读本地 SQLite；按检查点重放已加载模型，不是 walk-forward 重新训练，也不会触发抓取。">i</span>
+        <div class="panel-header">
+          <div>
+            <h2>历史回测与复盘</h2>
+            <div class="market-meta">统一读取本地已结束市场的 5 分钟区间；行情、盘口、成本后 edge 和结算评分随时间轴检查点联动。</div>
+          </div>
+          <span id="backtestStatus" class="badge neutral">未读取</span>
+        </div>
+        <div id="backtestSummary" class="archive-summary">尚未读取回测记录。</div>
+        <div class="review-grid">
+          <div class="review-value"><span class="metric-label">市场数</span><strong id="backtestMarkets">-</strong></div>
+          <div class="review-value"><span class="metric-label">检查点数</span><strong id="backtestRecords">-</strong></div>
+          <div class="review-value"><span class="metric-label">纸面候选检查点</span><strong id="backtestCandidates">-</strong></div>
+          <div class="review-value"><span class="metric-label">平均模型-盘口 edge</span><strong id="backtestMeanEdge">-</strong></div>
+          <div class="review-value"><span class="metric-label">平均成本后净 edge</span><strong id="backtestMeanNetEdge">-</strong></div>
+          <div class="review-value"><span class="metric-label">模型 Brier / Log Loss</span><strong id="backtestMeanScores">-</strong></div>
+          <div class="review-value"><span class="metric-label">模型 - 本地速度 Brier</span><strong id="backtestPaceBrierDelta">-</strong></div>
+          <div class="review-value"><span class="metric-label">模型 - 市场 Brier</span><strong id="backtestMarketBrierDelta">-</strong></div>
+        </div>
+        <details class="backtest-extra"><summary>运行身份与评分诊断</summary><div id="backtestRunInfo" class="archive-summary">运行身份：-</div><div id="backtestCalibration" class="archive-summary">校准诊断：-</div></details>
+      </section>
+      </div>
+      <p class="footer-note">汇总深度模拟，仅供研究。do_not_auto_trade=true</p>
     </section>
   </main>
 
@@ -695,19 +948,25 @@
       const state = {
         rows: [],
         privateRows: [],
+        privateByKey: new Map(),
         summaries: [],
         marketRows: new Map(),
+        replayRows: new Map(),
         market: "",
         index: 0,
         revealed: false,
         mode: "guess",
         liveTimer: null,
+        researchTimer: null,
         liveBusy: false,
         livePayload: null,
         liveSnapshots: [],
         liveMarket: "",
         historyTimer: null,
         historyBusy: false,
+        backtest: null,
+        historyRequest: 0,
+        source: "api",
         lastAutoReportFinish: "",
         newsTimer: null,
         newsBusy: false
@@ -716,6 +975,7 @@
       const $ = (id) => document.getElementById(id);
       const text = (id, value) => { $(id).textContent = value == null || value === "" ? "-" : String(value); };
       const number = (value) => {
+        if (value == null || String(value).trim() === "") return null;
         const parsed = Number(value);
         return Number.isFinite(parsed) ? parsed : null;
       };
@@ -730,7 +990,12 @@
       };
 
       if (window.location.protocol === "http:" || window.location.protocol === "https:") {
-        $("liveUrl").value = `${window.location.origin}/api/live`;
+        // The launcher lives on 8760; the research API it starts lives on 8765.
+        const port = window.location.port;
+        const apiOrigin = port === "8760"
+          ? "http://127.0.0.1:8765"
+          : window.location.origin;
+        $("liveUrl").value = `${apiOrigin}/api/live`;
       }
 
       function parseCsv(source) {
@@ -815,20 +1080,104 @@
         return textValue;
       }
 
+      async function fetchFixedCsv(name, request, columns = null) {
+        const response = await fetch(reportEndpoint(name), name === "public"
+          ? { cache: "no-store" }
+          : { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}", cache: "no-store" });
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({}));
+          throw new Error(error.message || `读取固定文件失败（HTTP ${response.status}）`);
+        }
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        const rows = [];
+        let headers = null, values = [], cell = "", column = 0;
+        let quoted = false, pendingQuote = false, afterCR = false, rowStarted = false;
+        let bytes = 0, lastYield = 0;
+        const keep = () => !headers || !columns || columns.has(headers[column]);
+        const finishCell = () => { values[column++] = cell; cell = ""; };
+        const finishRow = () => {
+          finishCell();
+          if (!headers) headers = values.map(value => value.replace(/^\uFEFF/, "").trim());
+          else if (rowStarted) {
+            const row = {};
+            headers.forEach((header, index) => {
+              if (!columns || columns.has(header)) row[header] = (values[index] || "").trim();
+            });
+            if (row.slug && row.checkpoint_utc) rows.push(row);
+          }
+          values = []; column = 0; rowStarted = false;
+        };
+        // Preserve CSV quote state across network chunks; discard unneeded large cells immediately.
+        const consume = source => {
+          for (const char of source) {
+            if (afterCR) { afterCR = false; if (char === "\n") continue; }
+            if (pendingQuote) {
+              pendingQuote = false;
+              if (char === '"') { if (keep()) cell += char; continue; }
+              quoted = false;
+            }
+            if (quoted) {
+              if (char === '"') pendingQuote = true;
+              else if (keep()) cell += char;
+              continue;
+            }
+            if (char === '"') { quoted = true; rowStarted = true; }
+            else if (char === ',') { finishCell(); rowStarted = true; }
+            else if (char === '\n' || char === '\r') { finishRow(); afterCR = char === '\r'; }
+            else { if (keep()) cell += char; rowStarted = true; }
+          }
+        };
+        try {
+          while (true) {
+            if (request !== state.historyRequest) { await reader.cancel(); return []; }
+            const { value, done } = await reader.read();
+            if (done) break;
+            bytes += value.byteLength;
+            consume(decoder.decode(value, { stream: true }));
+            if (bytes - lastYield >= 1024 * 1024) {
+              lastYield = bytes;
+              text("localReportStatus", `正在读取 ${name === "public" ? "公开预测" : "私有结算"}：${fmt(bytes / 1048576, 1)} MB`);
+              await new Promise(resolve => setTimeout(resolve, 0));
+            }
+          }
+          consume(decoder.decode());
+          if (quoted && !pendingQuote) throw new Error("CSV 引号未闭合");
+          if (rowStarted || column || cell) finishRow();
+          return rows;
+        } catch (error) {
+          await reader.cancel().catch(() => {});
+          throw error;
+        } finally { reader.releaseLock(); }
+      }
+
+      function setPrivateRows(rows) {
+        state.privateRows = rows;
+        state.privateByKey = new Map(rows.map(row => [rowKey(row), row]));
+      }
+
+      function qualityFlags(value) {
+        if (Array.isArray(value)) return value.join("、") || "-";
+        return value == null || value === "" ? "-" : String(value);
+      }
+
       async function loadFixedPublicReport() {
+        cancelHistoryLoad();
+        const request = ++state.historyRequest;
+        clearHistory("正在读取固定公开预测文件……");
         $("loadFixedPublicButton").disabled = true;
         text("localReportStatus", "正在读取固定公开预测文件……");
         try {
-          const rows = parseCsv(await fetchFixedReport("public"));
+          const rows = await fetchFixedCsv("public", request);
+          if (request !== state.historyRequest) return;
           if (!rows.length) throw new Error("固定公开预测文件没有可用记录");
           state.summaries = [];
           state.revealed = false;
-          state.mode = "guess";
-          $("guessMode").classList.add("active");
-          $("reviewMode").classList.remove("active");
           loadRows(rows, []);
           text("localReportStatus", `已加载固定公开预测：${rows.length} 条记录；结算答案未加载`);
         } catch (error) {
+          if (request !== state.historyRequest) return;
+          clearHistory("固定公开预测读取失败：" + error.message);
           text("localReportStatus", `固定公开预测读取失败：${error.message}`);
         } finally {
           $("loadFixedPublicButton").disabled = false;
@@ -836,6 +1185,7 @@
       }
 
       async function loadFixedPrivateReports() {
+        const request = state.historyRequest;
         if (!state.rows.length) {
           text("localReportStatus", "请先加载固定公开预测，再显式加载私有结算");
           return;
@@ -843,20 +1193,28 @@
         $("loadFixedPrivateButton").disabled = true;
         text("localReportStatus", "正在读取固定私有结算与汇总文件……");
         try {
-          const [privateText, summaryText] = await Promise.all([
-            fetchFixedReport("private", true),
+          const settlementColumns = new Set([
+            "slug", "checkpoint_utc", "model_forecast_final_count", "observed_local_final_count",
+            "resolved_bin", "resolved_lower", "resolved_upper", "forecast_in_resolved_bin",
+            "observed_count_verified", "absolute_error_to_observed_count", "market_expected_count",
+            "brier_score", "log_loss"
+          ]);
+          const [loadedRows, summaryText] = await Promise.all([
+            fetchFixedCsv("private", request, settlementColumns),
             fetchFixedReport("summary", true)
           ]);
-          const privateRows = parseCsv(privateText)
+          if (request !== state.historyRequest) return;
+          const privateRows = loadedRows
             .filter((row) => row.slug && row.checkpoint_utc)
             .sort((left, right) => rowTime(left) - rowTime(right));
           if (!privateRows.length) throw new Error("固定私有结算文件没有可用记录");
-          state.privateRows = privateRows;
+          setPrivateRows(privateRows);
           state.summaries = parseCsv(summaryText);
           state.revealed = false;
           update();
           text("localReportStatus", "私有结算已显式载入；仍需点击“揭晓结算”才显示答案");
         } catch (error) {
+          if (request !== state.historyRequest) return;
           text("localReportStatus", `固定私有结算读取失败：${error.message}`);
         } finally {
           $("loadFixedPrivateButton").disabled = false;
@@ -868,29 +1226,364 @@
         return Number.isFinite(value) ? value : 0;
       }
 
+      function nearestMarketFromRows(marketRows) {
+        const now = Date.now();
+        const candidates = [...marketRows.entries()].map(([slug, rows]) => {
+          const times = rows.map(rowTime).filter((value) => value > 0);
+          const latest = times.length ? Math.max(...times) : 0;
+          return { slug, latest };
+        }).filter((item) => item.latest > 0);
+        if (!candidates.length) return "";
+        const past = candidates.filter((item) => item.latest <= now);
+        const pool = past.length ? past : candidates;
+        pool.sort((left, right) => Math.abs(now - left.latest) - Math.abs(now - right.latest));
+        return pool[0].slug;
+      }
+
       function loadRows(rows, privateRows) {
+        cancelHistoryLoad();
+        state.historyRequest += 1;
+        clearHistory("正在读取 CSV");
+        state.source = "csv";
+        state.backtest = null;
         state.rows = rows
           .filter((row) => row.slug && row.checkpoint_utc)
           .sort((a, b) => rowTime(a) - rowTime(b));
-        state.privateRows = privateRows
+        setPrivateRows(privateRows
           .filter((row) => row.slug && row.checkpoint_utc)
-          .sort((a, b) => rowTime(a) - rowTime(b));
+          .sort((a, b) => rowTime(a) - rowTime(b)));
         state.marketRows = new Map();
+        state.replayRows = new Map();
+        $("hourSlider").disabled = !state.rows.length;
         state.rows.forEach((row) => {
           if (!state.marketRows.has(row.slug)) state.marketRows.set(row.slug, []);
           state.marketRows.get(row.slug).push(row);
         });
         const markets = [...state.marketRows.keys()];
-        state.market = markets[0] || "";
+        state.market = nearestMarketFromRows(state.marketRows) || markets[0] || "";
         state.index = 0;
         $("marketSelect").innerHTML = markets.map((market) =>
           `<option value="${escapeHtml(market)}">${escapeHtml(market)}</option>`).join("");
         $("marketSelect").value = state.market;
+        $("marketSelect").disabled = !markets.length;
+
         $("emptyState").classList.toggle("hidden", markets.length > 0);
         $("workspace").classList.toggle("hidden", markets.length === 0);
         $("statusDot").classList.toggle("ready", markets.length > 0);
-        text("statusText", markets.length ? `已加载 ${markets.length} 个市场 / ${state.rows.length} 个小时` : "没有可用预测行");
+        text("statusText", markets.length ? `已加载 ${markets.length} 个市场 / ${state.rows.length} 个历史检查点（CSV 数据源）` : "没有可用预测行");
         update();
+        text("workspaceStatus", "CSV 数据源；此数据源不含纸面交易记录。");
+      }
+
+      function clearHistory(message) {
+        state.paperAll=null;
+        text("paperAllStatus", "尚未统计"); $("paperAllBody").innerHTML = "";
+        text("paperPortfolio", ""); text("paperSettlement", "");
+        state.backtest = null;
+        state.replayRows = new Map();
+        state.marketRows = new Map();
+        state.rows = [];
+        setPrivateRows([]);
+        state.summaries = [];
+        state.index = 0;
+        state.revealed = false;
+        $("hourSlider").max = 0;
+        $("hourSlider").value = 0;
+        $("hourSlider").disabled = true;
+        for (const pane of ["predictionPane", "paperPane", "diagnosticPane"]) {
+          $(pane).querySelectorAll("tbody").forEach((body) => { body.innerHTML = ""; });
+          $(pane).querySelectorAll("canvas").forEach((canvas) => { canvas.width = canvas.width; canvas.onpointermove = canvas.onpointerleave = canvas.onpointerup = canvas.onpointercancel = null; });
+          $(pane).querySelectorAll(".chart-tooltip").forEach(node=>node.classList.add("hidden"));
+          $(pane).querySelectorAll(".metric-value, .signal-value, .review-value strong, .market-meta, .archive-summary").forEach((node) => { node.textContent = "-"; });
+        }
+        text("guessMain", message);
+        text("guessDetail", "-");
+        text("qualityBadge", "等待数据");
+        text("backtestStatus", message);
+        text("paperStatus", message);
+        text("workspaceStatus", message);
+        ["timelineStart", "timelineCursor", "timelineEnd"].forEach((id) => text(id, "-"));
+        $("answerContent").classList.add("hidden");
+        $("reviewContent").classList.add("hidden");
+        $("answerLock").classList.remove("hidden");
+        $("reviewLock").classList.remove("hidden");
+        $("residualSection").classList.add("hidden");
+        $("revealButton").disabled = true;
+        $("revealButton").textContent = "揭晓结算";
+        text("modeNote", "结算答案与评分已锁定");
+      }
+
+      let historyController = null;
+      let historyJob = null;
+      const historyClientId = crypto.randomUUID();
+      function cancelHistoryLoad() {
+        historyController?.abort();
+        if (historyJob) {
+          fetch(historyJob, {method:"DELETE", signal:AbortSignal.timeout(5000)}).catch(()=>{});
+          historyJob = null;
+        }
+      }
+      function applyPaperSettings(endpoint) {
+        endpoint.searchParams.set("paper_mode", $("paperMode").value);
+        for (const [id,key,scale] of [["paperCoverage","paper_probability_coverage",.01],["paperCapital","paper_capital_units",1],["paperTakeProfit","paper_take_profit_return",.01],["paperStopLoss","paper_stop_loss_return",-.01]]) {
+          if (!$(id).checkValidity() || !$(id).value) throw new Error("模拟参数无效");
+          endpoint.searchParams.set(key, String(Number($(id).value)*scale));
+        }
+        for (const id of ["paperEntryTime","paperEntryMinutes"]) if (!$(id).value || !$(id).checkValidity()) throw new Error("建仓等待时间无效");
+        endpoint.searchParams.set("paper_entry_elapsed_minutes", String(Number($("paperEntryTime").value)*60+Number($("paperEntryMinutes").value)));
+        endpoint.searchParams.set("paper_exit_policy", $("paperExitPolicy").value);
+      }
+      async function loadUnifiedHistory(slug) {
+        cancelHistoryLoad();
+        const controller = new AbortController();
+        historyController = controller;
+        const deadline = setTimeout(()=>controller.abort(), 130000);
+        const request = ++state.historyRequest;
+        state.source = "api";
+        state.market = slug;
+        clearHistory(slug ? "正在读取 " + slug : "请选择市场");
+        if (!slug) { clearTimeout(deadline); return; }
+        try {
+          const read = async (url) => {
+            const response = await fetch(url, {cache:"no-store", signal:AbortSignal.any([controller.signal, AbortSignal.timeout(15000)])});
+            const payload = await response.json();
+            if (!response.ok || payload.ok === false) throw new Error(payload.message || "历史读取失败");
+            return payload;
+          };
+          const endpoint = historyEndpoint("/api/backtest-review");
+          endpoint.searchParams.set("async", "1");
+          endpoint.searchParams.set("client_id", historyClientId);
+          endpoint.searchParams.set("generation", String(request));
+          endpoint.searchParams.set("slug", slug);
+          endpoint.searchParams.set("step_minutes", "5");
+          endpoint.searchParams.set("min_elapsed_minutes", "5");
+          endpoint.searchParams.set("limit", $("backtestLimit").value || "10000");
+          applyPaperSettings(endpoint);
+          if ($("backtestStart").value) endpoint.searchParams.set("start", $("backtestStart").value);
+          if ($("backtestEnd").value) endpoint.searchParams.set("end", $("backtestEnd").value);
+          let payload = await read(endpoint);
+          if (payload.job_id) {
+            const job = historyEndpoint("/api/backtest-jobs/" + encodeURIComponent(payload.job_id));
+            if (request !== state.historyRequest) {
+              fetch(job, {method:"DELETE", signal:AbortSignal.timeout(5000)}).catch(()=>{});
+              return;
+            }
+            historyJob = job;
+            while (payload.state === "queued" || payload.state === "running") {
+              if (request !== state.historyRequest) return;
+              const progress = `${slug} · ${payload.state === "queued" ? "排队中" : "正在计算"} · ${payload.completed || 0}/${payload.total || "待统计"} 个检查点（最多120秒）`;
+              text("workspaceStatus", progress); text("paperStatus", progress);
+              await new Promise(resolve=>setTimeout(resolve, 350));
+              payload = await read(job);
+              if (request !== state.historyRequest) return;
+            }
+            historyJob = null;
+            if (payload.state !== "complete") throw new Error(payload.message || "历史任务已取消或过期，请重新读取");
+            payload = payload.result;
+          }
+          if (request !== state.historyRequest) return;
+          if (!Array.isArray(payload.records) || payload.records.some((row) => !row || row.slug !== slug || !Number.isFinite(Date.parse(row.checkpoint_utc)))) throw new Error("响应市场或检查点不匹配");
+          const records = (Array.isArray(payload.records) ? payload.records : []).map((record) => {
+            const outcomes = Array.isArray(record.outcome_market_rows) ? record.outcome_market_rows : [];
+            const priced = outcomes.filter((item) => item.market_probability != null);
+            const marketExpected = priced.length
+              ? priced.reduce((sum, item) => {
+                  const lower = number(item.lower_count);
+                  const upper = number(item.upper_count);
+                  const midpoint = lower == null ? 0 : (upper == null ? lower + 10 : (lower + upper) / 2);
+                  return sum + midpoint * number(item.market_probability);
+                }, 0)
+              : null;
+            const marketMass = number(record.market_probability_mass);
+            const fullMarket = outcomes.length > 0 && outcomes.every((item) => item.market_probability != null);
+            return {
+              ...record,
+              slug: record.slug,
+              elapsed_hours: record.elapsed_hours,
+              market_expected_count: marketExpected,
+              price_probability_mass: marketMass,
+              price_distribution_valid: fullMarket && marketMass != null && marketMass >= 0.6 && marketMass <= 1.2,
+              bin_probabilities_json: JSON.stringify(record.bin_probabilities || {}),
+              price_snapshot_json: JSON.stringify(record.price_snapshot || []),
+              orderbook_snapshot_json: JSON.stringify(record.orderbook_snapshot || []),
+            };
+          });
+
+          records.sort((a, b) => rowTime(a) - rowTime(b));
+          if (new Set(records.map(rowKey)).size !== records.length) throw new Error("响应含重复检查点");
+          state.backtest = { ...payload, records };
+          state.rows = records;
+          setPrivateRows(records);
+          state.replayRows.set(slug, records);
+          state.index = Math.max(0, records.findIndex(r=>(r.position_actions||[]).some(a=>a.quantity_delta)));
+          const coverage = payload.coverage || {};
+          const note = records.length
+            ? `已读取 ${records.length}/${coverage.total_checkpoint_count ?? records.length} 个检查点${coverage.truncated ? "（已截断）" : ""}；返回范围 ${records[0].checkpoint_utc} 至 ${records.at(-1).checkpoint_utc}`
+            : (coverage.empty_message || "所选日期范围没有检查点，请读取完整市场范围");
+          const entry = payload.markets?.find(item=>item.slug===slug);
+          text("workspaceStatus", note + (entry ? `；首小时有效盘口覆盖 ${entry.paper_entry_covered_checkpoints ?? "-"}/12（已计算范围）` : ""));
+          text("historyMarketNote", note);
+          $("emptyState").classList.add("hidden");
+          $("hourSlider").disabled = !records.length;
+          renderBacktest(state.backtest);
+          if (!records.length) text("paperStatus", note);
+          update();
+          if (endpoint.searchParams.get("paper_exit_policy") === "hold_to_settlement" && endpoint.searchParams.get("paper_mode") === "mandatory_entry") {
+            runAllHolding(endpoint, request, controller.signal).catch(error=>{
+              if(request===state.historyRequest) text("paperAllStatus","全历史统计中断："+error.message);
+            });
+          }
+        } catch (error) {
+          if (request !== state.historyRequest) return;
+          cancelHistoryLoad();
+          clearHistory("历史读取失败：" + (["AbortError","TimeoutError"].includes(error.name) ? "读取超时，旧任务已取消。请重试或缩小日期范围。" : error.message));
+        } finally {
+          clearTimeout(deadline);
+        }
+      }
+
+      async function runAllHolding(template, request, signal) {
+        const read = async (url, phase, retry=true) => {
+          for(let attempt=0; ; attempt++){
+            try {
+              const response=await fetch(url,{signal:AbortSignal.any([signal,AbortSignal.timeout(15000)]),cache:"no-store"});
+              const body=await response.json();
+              if(!response.ok || body.ok===false) throw new Error(body.message||"读取失败");
+              return body;
+            }catch(error){
+              if(signal.aborted) throw error;
+              if(!retry || attempt>=2 || !["TimeoutError","TypeError"].includes(error.name)) throw new Error(phase+"："+error.message);
+              text("paperAllStatus",`${phase}暂时无响应，重试 ${attempt+1}/2；已完成结果保留`);
+              await new Promise(resolve=>setTimeout(resolve,500));
+            }
+          }
+        };
+        text("paperAllStatus","正在读取历史市场目录…");
+        const list=historyEndpoint("/api/local-markets");list.searchParams.set("limit","500");list.searchParams.set("view","history");
+        const catalog=await read(list,"市场目录读取");
+        if(!Array.isArray(catalog.markets)) throw new Error("历史市场目录响应无效");
+        const allMarkets=[...new Map(catalog.markets.filter(m=>m?.slug && Date.parse(m.window_end_utc)<=Date.now()).map(m=>[m.slug,m])).values()];
+        const markets=allMarkets.filter(m=>m.eligible_for_profitability_analysis===true);
+        const excludedMarkets=allMarkets.filter(m=>m.eligible_for_profitability_analysis!==true);
+        const summaries=markets.map(m=>({slug:m.slug,pending:true,data_completeness_tag:m.data_completeness_tag,data_completeness_reasons:m.data_completeness_reasons}));let invested=0, profit=0, eligible=0, completed=0;
+        state.paperAll={summaries,eligible,invested,profit,total:markets.length,excluded:excludedMarkets.length,excludedMarkets};renderAllHolding();
+        for(const market of markets){
+          if(request!==state.historyRequest) return;
+          text("paperAllStatus",`正在统计 ${completed}/${markets.length}：${market.slug}；使用本次建仓时长及覆盖参数`);
+          const endpoint=new URL(template);endpoint.searchParams.set("slug",market.slug);
+          endpoint.searchParams.delete("start");endpoint.searchParams.delete("end");
+          endpoint.searchParams.set("limit","10000");endpoint.searchParams.set("paper_hold_summary","1");
+          let summary;
+          try {
+            let result=await read(endpoint,"提交市场任务",false);
+            if(result.job_id){
+              const job=historyEndpoint("/api/backtest-jobs/"+encodeURIComponent(result.job_id));historyJob=job;
+              while(["queued","running"].includes(result.state)){
+                await new Promise(resolve=>setTimeout(resolve,350));
+                if(request!==state.historyRequest) return;
+                result=await read(job,"市场任务轮询");
+              }
+              historyJob=null;
+              if(result.state!=="complete") throw new Error(result.message||result.state);
+              result=result.result;
+            }
+            summary=result.markets?.find(m=>m.slug===market.slug);
+            if(!summary) throw new Error(result.coverage?.empty_message || "该市场未返回统计结果");
+          }catch(error){
+            if(signal.aborted) throw error;
+            if(historyJob){fetch(historyJob,{method:"DELETE",signal:AbortSignal.timeout(5000)}).catch(()=>{});historyJob=null;}
+            summary={slug:market.slug,error:error.message};
+          }
+          if(request!==state.historyRequest) return;
+          summaries[completed++]=summary;
+          if(summary.paper_entry_actual_utc && summary.paper_settled && Number(summary.paper_total_buy_cost)>0 && summary.paper_final_pnl!=null && Number.isFinite(Number(summary.paper_final_pnl))){
+            eligible++;invested+=Number(summary.paper_total_buy_cost);profit+=Number(summary.paper_final_pnl);
+          }
+          state.paperAll={summaries,eligible,invested,profit,total:markets.length};renderAllHolding();
+        }
+        const failed=summaries.filter(m=>m.error).length, unfilled=summaries.filter(m=>!m.error&&!m.paper_entry_actual_utc).length;
+        text("paperAllStatus",`${completed}/${markets.length} eligible markets processed; excluded incomplete-data markets: ${excludedMarkets.length}. Excluded markets are omitted from profitability totals.`);
+        text("paperAllStatus",`统计完成 ${completed}/${markets.length}；有效已成交且已结算 ${eligible}，未成交 ${unfilled}，失败 ${failed}，未结算 ${completed-eligible-unfilled-failed}。未成交、未结算及失败不计入收益。`);
+      }
+      function renderAllHolding(){
+        const data=state.paperAll;if(!data) return;
+        $("paperAllBody").innerHTML=data.summaries.map(m=>{
+          const filled=Boolean(m.paper_entry_actual_utc), settled=filled&&m.paper_settled&&!m.error;
+          const status=m.pending?"待统计":m.error?"失败："+m.error:!filled?"未成交 · "+(m.paper_entry_diagnostic||"缺少可执行历史盘口或所选档未成交"):(m.paper_settled?"已结算 · ":"未结算 · ")+m.paper_entry_actual_utc+(m.paper_entry_delay_minutes>0?`（顺延 ${fmt(m.paper_entry_delay_minutes/60,2)} 小时）`:"");
+          return `<tr><td>${escapeHtml(m.slug)}</td><td>${escapeHtml(status)}</td><td>${m.pending||m.error?"-":fmt(m.paper_total_buy_cost,4)}</td><td>${!settled?"-":state.revealed?fmt(m.paper_final_pnl,4):"揭晓后显示"}</td><td>${!settled?"-":state.revealed?pct(m.paper_final_return):"揭晓后显示"}</td></tr>`;
+        }).join("")+
+          `<tr><td>有效市场合计 ${data.eligible}</td><td>加权收益率＝总盈亏 / 总实际投入</td><td>${fmt(data.invested,4)}</td><td>${state.revealed?fmt(data.profit,4):"揭晓后显示"}</td><td>${state.revealed && data.invested?pct(data.profit/data.invested):"-"}</td></tr>`;
+      }
+
+      async function runPaperGridResearch(){
+        const status = $("paperGridStatus");
+        try {
+          const entries = $("paperGridEntries").value.split(",").map(v=>Number(v.trim())).filter(Number.isFinite);
+          const coverage = $("paperGridCoverage").value.split(",").map(v=>{
+            const raw=v.trim().toLowerCase();
+            return raw === "center" ? 0.01 : Number(raw.replace("%","")) / 100;
+          }).filter(Number.isFinite);
+          const budget = Number($("paperGridBudget").value);
+          if(!entries.length || !coverage.length || !Number.isFinite(budget) || budget<=0 || entries.length*coverage.length>64 || coverage.some(v=>v<=0||v>1)) throw new Error("网格参数无效（组合数不超过 64）");
+          const request = ++state.historyRequest;
+          cancelHistoryLoad();
+          const endpoint=historyEndpoint("/api/paper-grid-research");
+          endpoint.searchParams.set("async","1"); endpoint.searchParams.set("client_id",historyClientId); endpoint.searchParams.set("generation",String(request));
+          endpoint.searchParams.set("entry_minutes",entries.join(",")); endpoint.searchParams.set("coverage_grid",coverage.join(",")); endpoint.searchParams.set("market_budget",String(budget));
+          status.textContent="正在提交网格研究…";
+          let response=await fetch(endpoint,{cache:"no-store"}); let payload=await response.json();
+          if(!response.ok || payload.ok===false) throw new Error(payload.message||"提交失败");
+          if(payload.job_id){
+            const job=historyEndpoint("/api/paper-grid-jobs/"+encodeURIComponent(payload.job_id)); historyJob=job;
+            while(["queued","running"].includes(payload.state)){
+              status.textContent=`网格研究 ${payload.state} · ${payload.completed||0}/${payload.total||"?"} 个组合`;
+              await new Promise(resolve=>setTimeout(resolve,500));
+              response=await fetch(job,{cache:"no-store"}); payload=await response.json();
+              if(request!==state.historyRequest) return;
+            }
+            historyJob=null;
+            if(payload.state!=="complete") throw new Error(payload.message||"网格研究失败");
+            payload=payload.result;
+          }
+          if(request!==state.historyRequest) return;
+          const rows=Array.isArray(payload.results)?payload.results:[];
+          $("paperGridBody").innerHTML=rows.map(item=>{
+            const fixed=item.fixed_budget||{}, shared=item.shared_pool||{}, cfg=item.config||{};
+            return `<tr><td>${escapeHtml(cfg.label||"-")}</td><td>${fmt(fixed.risk_adjusted_score,4)}</td><td>${pct(fixed.return_on_invested)}</td><td>${pct(fixed.max_drawdown_fraction)}</td><td>${fixed.filled_and_settled_markets??0}</td><td>${pct(shared.return_on_initial_capital)}</td></tr>`;
+          }).join("");
+          const wf=payload.walk_forward||{};
+          $("paperGridWalkForward").textContent=`最佳固定预算组合：${payload.best_fixed_budget||"暂无"}；walk-forward 验证市场 ${wf.validated_markets||0}，折数 ${(wf.folds||[]).length}。风险调整分数=投入收益率−最大回撤比例。所有结果均为纸面研究。`;
+          status.textContent=`网格研究完成：${rows.length} 个组合；do_not_auto_trade=${payload.do_not_auto_trade}`;
+        }catch(error){ status.textContent="网格研究失败："+error.message; }
+      }
+
+      async function loadBacktestMarkets() {
+        const select = $("marketSelect");
+        if (!select) return;
+        try {
+          const endpoint = historyEndpoint("/api/local-markets");
+          endpoint.searchParams.set("view", "history");
+          endpoint.searchParams.set("limit", "200");
+          const response = await fetch(endpoint, { cache: "no-store" });
+          const payload = await response.json();
+          if (!response.ok || payload.ok === false) throw new Error(payload.message || "无法读取本地市场");
+          const now = Date.now();
+          const ended = (Array.isArray(payload.markets) ? payload.markets : [])
+            .filter((item) => item && item.slug && Date.parse(item.window_end_utc || "") <= now)
+            .sort((a,b)=>Date.parse(b.window_end_utc)-Date.parse(a.window_end_utc));
+          if (state.source === "csv") return;
+          select.innerHTML = ended.length
+            ? ended.map((item) => `<option value="${escapeHtml(item.slug)}">${item.eligible_for_profitability_analysis===true?"[complete]":"[incomplete]"} ${escapeHtml(item.slug)}</option>`).join("")
+            : '<option value="">没有已结束本地市场</option>';
+          // The API is ordered by nearest local capture time; use that as the
+          // default historical market, matching the review/archive behavior.
+          if (ended.length) select.value = ended[0].slug;
+          select.disabled = ended.length === 0;
+        } catch (error) {
+          if (state.source === "csv") return;
+          select.innerHTML = '<option value="">本地历史市场读取失败</option>';
+          select.disabled = true;
+        }
       }
 
       function escapeHtml(value) {
@@ -927,7 +1620,7 @@
         const recommendation = payload.recommendation || {};
         const stock = payload.stock || {};
         $("liveWorkspace").classList.remove("hidden");
-        text("liveMarketMeta", `${payload.slug} · ${payload.window?.start_utc || "-"} → ${payload.window?.end_utc || "-"}`);
+        text("liveMarketMeta", liveWindowLabel(payload));
         text("liveCurrentCount", count.current);
         text("liveTrackerAge", count.tracker_refresh_age_seconds == null ? "-" : `${count.tracker_refresh_age_seconds}s`);
         text("liveForecastCount", prediction.final_count == null ? "-" : `${fmt(prediction.final_count, 2)}（约${prediction.final_count_rounded ?? Math.round(Number(prediction.final_count))}）`);
@@ -936,6 +1629,12 @@
         text("liveForecastProbability", pct(prediction.forecast_bin_probability));
         const stockPrice = stock.price == null ? "-" : `${fmt(stock.price, 2)} ${stock.currency || ""} ${stock.change_pct == null ? "" : `(${pct(stock.change_pct)})`}`;
         text("liveStock", stockPrice.trim());
+        const dynamics = payload.dynamics_features || {};
+        text("liveDynamicsElapsed", fmt(dynamics.elapsed_minutes, 1));
+        text("liveDynamicsPosts", `${fmt(dynamics.posts_5m, 1)} / ${fmt(dynamics.posts_15m, 1)}`);
+        text("liveDynamicsAcceleration", fmt(dynamics.post_acceleration, 4));
+        text("liveDynamicsGap", fmt(dynamics.model_market_gap, 2));
+        text("liveDynamicsAge", dynamics.source_age_seconds == null ? "-" : `${fmt(dynamics.source_age_seconds, 1)}s`);
         const priceValid = Boolean(market.distribution_valid);
         const trackerFresh = !count.stale;
         const qualityGood = priceValid && trackerFresh && Array.isArray(market.outcomes) && market.outcomes.length > 0;
@@ -949,7 +1648,38 @@
         const candidate = recommendation.candidate || {};
         const candidateText = candidate.label ? `候选 ${candidate.label} · 成本后 edge ${pct(candidate.edge_after_cost)}` : "无可执行区间候选";
         text("liveRecommendationDetail", reasons.length ? `风险门槛：${reasons.join("、")} · ${candidateText}` : `${candidateText} · 只允许纸面观察，不执行交易。`);
-        $("liveStatus").textContent = `已连接 · 服务 ${payload.service_version || "旧版本"} · ${payload.generated_at_utc || "-"} · 纸面快照 #${payload.paper_forecast_id || "-"}${payload.errors?.length ? " · 部分数据源失败" : ""}`;
+        const discovery = payload.market_discovery || {};
+        const discoveryLabel = discovery.state === "error"
+          ? "市场发现失败"
+          : discovery.state === "ok" && Array.isArray(discovery.active_slugs) && discovery.active_slugs.length
+            ? `当前市场 ${discovery.active_slugs.length} 个`
+            : discovery.state === "ok" ? "当前无市场" : "显式市场";
+        const backfillLabel = Array.isArray(discovery.queued_backfills) && discovery.queued_backfills.length
+          ? ` · 待补档 ${discovery.queued_backfills.length}` : "";
+        const settlement = payload.settlement_reconciliation || {};
+        const sourceLabel = payload.errors?.length
+          ? (payload.errors.every((item) => String(item).includes("closed_outcome_expected")) ? " · 已结算盘口无可用 CLOB" : " · 部分数据源失败")
+          : "";
+        const settlementLabel = settlement.status === "verified" && settlement.count_in_official_range === false
+          ? ` · 本地计数 ${settlement.observed_local_count} 不在官方区间` : "";
+        const official = payload.official_settlement || {};
+        const officialLabel = official.status === "verified" ? " · 官方结算已核验" : " · 官方结算待定";
+        const capture = payload.capture || {};
+        const captureLabel = capture.checkpoint_utc ? ` · 五分钟检查点 ${capture.checkpoint_utc}` : "";
+        const missingCount = Number(capture.missing_checkpoint_count || 0);
+        const recordingStatus = String(capture.recording_status || "");
+        if (recordingStatus === "recorded" && missingCount === 0) {
+          text("liveRecordingStatus", "正在正常记录当前市场信息");
+        } else if (missingCount > 0 || recordingStatus === "recorded_with_gaps") {
+          text("liveRecordingStatus", `已尝试但缺失：${missingCount} 个历史五分钟时间段；未用当前盘口回填`);
+        } else if (recordingStatus === "missing_checkpoint") {
+          text("liveRecordingStatus", "已尝试但缺失：当前检查点没有本地记录");
+        } else if (capture.interval_status === "coarser_than_target") {
+          text("liveRecordingStatus", "当前记录间隔长于五分钟，无法声称完整五分钟覆盖");
+        } else {
+          text("liveRecordingStatus", "等待记录状态");
+        }
+        $("liveStatus").textContent = `已连接 · ${discoveryLabel}${backfillLabel}${sourceLabel}${settlementLabel}${officialLabel}${captureLabel} · 服务 ${payload.service_version || "旧版本"} · ${payload.generated_at_utc || "-"} · 纸面快照 #${payload.paper_forecast_id || "-"}`;
         $("statusDot").classList.toggle("ready", true);
         text("liveEventCount", `${Array.isArray(payload.approved_events) ? payload.approved_events.length : 0} 个已批准事件`);
 
@@ -963,12 +1693,33 @@
         renderLiveList("liveNews", payload.news, "暂无新闻或新闻源不可用");
       }
 
+      function liveWindowLabel(payload) {
+        const windowInfo=payload.window || {};
+        const format=(value,zone)=>value && Number.isFinite(Date.parse(value))
+          ? new Intl.DateTimeFormat('zh-CN',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23',timeZoneName:'short'}).format(new Date(value)) : '未知';
+        const now=Date.now(), start=Date.parse(windowInfo.start_utc), end=Date.parse(windowInfo.end_utc);
+        const phase=now<start?`距开始 ${Math.ceil((start-now)/60000)} 分钟`:now<end?`距结束 ${Math.ceil((end-now)/60000)} 分钟`:'已结束或窗口未知';
+        return `${payload.slug} · 北京时间：${format(windowInfo.start_utc,'Asia/Shanghai')} → ${format(windowInfo.end_utc,'Asia/Shanghai')} · 纽约时间：${format(windowInfo.start_utc,'America/New_York')} → ${format(windowInfo.end_utc,'America/New_York')} · ${phase} · 最近发现（北京时间）：${format(payload.market_discovery?.queried_at_utc,'Asia/Shanghai')}`;
+      }
+
+      function currentLiveRows(snapshots, now=Date.now()) {
+        return snapshots.filter(row=>{
+          if(!row || !row.slug)return false;
+          if(!row.market_discovery?.active_slugs)return true;
+          return row.market_discovery.active_slugs.includes(row.slug)
+            && Date.parse(row.window?.start_utc)<=now && now<Date.parse(row.window?.end_utc);
+        }).sort((a,b)=>(Date.parse(b.window?.start_utc)||0)-(Date.parse(a.window?.start_utc)||0));
+      }
+
       function renderLiveMarkets(snapshots) {
         state.liveSnapshots = Array.isArray(snapshots) ? snapshots : [];
-        const available = state.liveSnapshots.filter((row) => row && row.slug);
+        const available = currentLiveRows(state.liveSnapshots);
         if (!available.length) {
           $("liveMarketSelect").innerHTML = "<option value=\"\">暂无可用市场</option>";
           $("liveMarketSelect").disabled = true;
+          state.liveMarket = '';
+          $("liveWorkspace").classList.add('hidden');
+          text('liveMarketMeta','暂无当前有效市场，等待下一次发现；不使用已结束盘口。');
           return;
         }
         if (!state.liveMarket || !available.some((row) => row.slug === state.liveMarket)) {
@@ -981,6 +1732,9 @@
         $("liveMarketSelect").disabled = false;
         renderLive(available.find((row) => row.slug === state.liveMarket));
       }
+
+      // Expire a displayed live snapshot even while a slow REST refresh is pending.
+      setInterval(()=>{if(state.liveSnapshots.some(row=>row?.market_discovery?.active_slugs))renderLiveMarkets(state.liveSnapshots);},1000);
 
       function aiEndpoint(path) {
         const endpoint = new URL($("liveUrl").value.trim(), window.location.href);
@@ -1099,6 +1853,43 @@
         }
       }
 
+      async function pullResearchStatus() {
+        try {
+          const endpoint = new URL($('liveUrl').value.trim(), window.location.href);
+          endpoint.pathname = '/api/research-capture/status';
+          endpoint.search = '';
+          const response = await fetch(endpoint, {cache: 'no-store'});
+          const payload = await response.json();
+          if (!response.ok || payload.ok === false) throw new Error(payload.message || '研究采样状态读取失败');
+          const latest = payload.latest || {};
+          const captured = latest.generated_at_utc || latest.captured_at_utc || '-';
+          const status = latest.capture_status || latest.capture?.recording_status || '等待';
+          text('researchCaptureStatus', `研究采样：${payload.target_interval_seconds || 30} 秒 · ${status} · 最近记录 ${captured} · 仅研究，不进入五分钟策略/edge`);
+        } catch (error) {
+          text('researchCaptureStatus', `研究采样状态不可用：${error.message}`);
+        }
+      }
+
+      async function researchCaptureNow() {
+        const button = $('researchCaptureNowButton');
+        button.disabled = true;
+        text('researchCaptureStatus', '研究采样：正在记录当前盘口、帖子和新闻（仅研究）……');
+        try {
+          const endpoint = new URL($('liveUrl').value.trim(), window.location.href);
+          endpoint.pathname = '/api/research-capture/now';
+          endpoint.search = '';
+          const response = await fetch(endpoint, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}', cache: 'no-store'});
+          const payload = await response.json();
+          if (!response.ok || payload.ok === false) throw new Error(payload.message || '研究采样失败');
+          text('researchCaptureStatus', `研究采样：已记录 ${Array.isArray(payload.snapshots) ? payload.snapshots.length : 0} 个市场 · 仅研究，不进入五分钟策略/edge`);
+        } catch (error) {
+          text('researchCaptureStatus', `研究采样失败：${error.message}`);
+        } finally {
+          button.disabled = false;
+          pullResearchStatus();
+        }
+      }
+
       async function refreshNow() {
         if (state.liveBusy) return;
         state.liveBusy = true;
@@ -1134,17 +1925,185 @@
         return endpoint;
       }
 
+      async function readJsonResponse(response, context = "请求") {
+        const raw = await response.text();
+        let payload;
+        try {
+          payload = raw ? JSON.parse(raw) : {};
+        } catch (_) {
+          const detail = raw.trim().slice(0, 180) || "空响应";
+          throw new Error(`${context}失败：HTTP ${response.status}，后端返回非 JSON：${detail}。请确认研究台已在 8765 端口运行并重启旧服务。`);
+        }
+        if (!response.ok || payload.ok === false) {
+          throw new Error(payload.message || `${context}失败：HTTP ${response.status}`);
+        }
+        return payload;
+      }
+
+      function archiveRows(id, rows, columns, render) {
+        const items = Array.isArray(rows) ? rows : [];
+        $(id).innerHTML = items.length
+          ? items.slice(0, 200).map(render).join("")
+          : `<tr><td colspan="${columns}">本地归档中没有该类记录</td></tr>`;
+      }
+
+      async function loadHistoryReview() {
+        const request = state.historyRequest;
+        const slug = state.market;
+        if (!slug) return;
+        text("timeDecayStatus", "正在读取敏感性");
+        try {
+          const endpoint = historyEndpoint("/api/history-review");
+          endpoint.searchParams.set("slug", slug);
+          endpoint.searchParams.set("half_life_days", $("timeDecayHalfLife").value);
+          endpoint.searchParams.set("max_age_days", $("timeDecayMaxAge").value);
+          const response = await fetch(endpoint, { cache: "no-store" });
+          const payload = await response.json();
+          if (request !== state.historyRequest || slug !== state.market) return;
+          if (!response.ok || payload.ok === false) throw new Error(payload.message || "读取失败");
+          const decay = payload.review?.time_decay || {};
+          text("timeDecayStatus", `有效历史市场 ${decay.eligible_prior_markets ?? "-"}；有效权重 ${fmt(decay.effective_sample_size, 3)}；加权预测参考 ${fmt(decay.weighted_archived_forecast_reference, 3)}`);
+        } catch (error) {
+          if (request === state.historyRequest) text("timeDecayStatus", error.message);
+        }
+      }
+
+      function paperActionLabel(action) {
+        if (action.action === "settlement") return "到期兑付";
+        if (action.reason === "probability_risk_guard" && !action.quantity_delta) return "概率保护：禁止新增仓位";
+        const reasons = {missing_orderbook_snapshot:"未采集盘口",invalid_source_time:"来源时间无效",stale_book:"盘口过期",future_book:"盘口时间晚于检查点",invalid_quote:"报价或深度无效",wrong_yes_token:"YES token 不匹配",entry_window_closed:"错过开仓窗口",edge_below_entry:"优势不足"};
+        if (!action.point_in_time_safe) return reasons[action.reason] || "无安全历史盘口";
+        if (!action.quantity_delta && action.action !== "no_fill" && reasons[action.reason]) return reasons[action.reason];
+        if (action.action === "no_fill") return `${action.requested_quantity_delta > 0 ? "买入 / " : action.requested_quantity_delta < 0 ? "卖出 / " : ""}尝试成交但未成交`;
+        const quantity = number(action.quantity_delta);
+        if (quantity > 0) return "买入" + (action.partial_fill ? "（部分成交）" : "");
+        if (quantity < 0) return "卖出" + (action.partial_fill ? "（部分成交）" : "");
+        return "未触发交易 / 保持";
+      }
+
+      function renderPaper(row) {
+        text("paperPortfolio", ""); text("paperSettlement", "");
+        const fillIndices=currentRows().map((r,i)=>(r.position_actions||[]).some(a=>a.quantity_delta)?i:-1).filter(i=>i>=0);
+        $("paperFirstFill").disabled=!fillIndices.length;
+        $("paperPreviousFill").disabled=!fillIndices.some(i=>i<state.index);
+        $("paperNextFill").disabled=!fillIndices.some(i=>i>state.index);
+        const actions = row?.position_actions;
+        if (!Array.isArray(actions)) {
+          text("paperStatus", state.source === "csv" ? "此数据源不含纸面交易记录" : "此检查点不含纸面交易记录");
+          $("paperPositionBody").innerHTML = "";
+          $("paperActionBody").innerHTML = "";
+          text("paperHistoryNote", "-");
+          return;
+        }
+        text("paperStatus", `${row.slug} · ${row.checkpoint_utc} · 现金 ${fmt(row.paper_cash,4)} · 本次调仓 ${fmt(row.paper_checkpoint_turnover,4)} · 首小时已覆盖 ${row.paper_entry_coverage_so_far ?? "-"}/12 · 汇总深度模拟 · ${actions.some((item) => item.point_in_time_safe) ? "已计算" : "无安全历史盘口"}`);
+        if (row.probability_guard) {
+          const guard = row.probability_guard;
+          const mandatory = state.backtest?.run_config?.paper_mode === "mandatory_entry";
+          $("paperStatus").textContent += `；原始预测 ${fmt(guard.raw_forecast,1)} → 受约束预测 ${fmt(row.model_forecast_final_count,1)}；参考范围 ${fmt(guard.support_lower,0)}–${fmt(guard.support_upper,0)}；${mandatory ? "首笔强制建仓，后续增持沿用概率保护" : "新增仓位概率至少10%"}（未经校准）`;
+          if (!mandatory && !guard.entry_supported) $("paperStatus").textContent += "；历史先验不足且观测未满24小时，暂停新增仓位";
+        }
+        const priority = a => a.quantity_delta ? 0 : a.position_after > 0 ? 1 : a.point_in_time_safe ? 2 : 3;
+        $("paperPositionBody").innerHTML = [...actions].sort((a,b)=>priority(a)-priority(b)).map((item) =>
+          `<tr><td>${escapeHtml(item.outcome_label)}</td><td>${paperActionLabel(item)}</td><td>${fmt(Math.abs(item.quantity_delta), 4)}</td><td>${fmt(item.position_after, 4)}</td><td>${fmt(item.realized_pnl, 4)}</td><td>${item.position_after === 0 ? "无持仓，无需估值" : item.unrealized_pnl == null ? "缺失估值" : fmt(item.unrealized_pnl, 4)}</td></tr>`
+        ).join("") || '<tr><td colspan="6">无 outcome 记录</td></tr>';
+        const isFilled = item => Number.isFinite(Number(item.quantity_delta)) && Number(item.quantity_delta) !== 0;
+        const prior = (currentRows()[0]?.paper_prior_actions || []).filter(isFilled).map((item) => ({ ...item, checkpoint: item.checkpoint_utc }));
+        const history = prior.concat(currentRows().slice(0, state.index + 1).flatMap((record) =>
+          (record.position_actions || []).filter(isFilled).map((item) => ({ ...item, checkpoint: record.checkpoint_utc }))
+        ));
+        const config = state.backtest?.run_config || {};
+        if(config.paper_exit_policy === "hold_to_settlement") $("paperStatus").textContent += "；持有至结算：不提前卖出、不增持，止盈/止损及edge退出已关闭";
+        const realized = actions.reduce((sum,a)=>sum+(Number(a.realized_pnl)||0),0);
+        const budget = config.paper_market_budget ?? row.paper_position_methodology?.market_budget;
+        const pnl = row.paper_unrealized_pnl == null ? null : realized + row.paper_unrealized_pnl;
+        const entryLabels = {not_reached:"未到指定建仓时间",waiting_for_valid_book:"等待目标档有效盘口",filled:"已建仓",unavailable_before_market_end:"强制建仓无法执行",pending_in_remaining_range:"剩余范围待计算"};
+        const marketSummary = state.backtest?.markets?.find(m=>m.slug===row.slug);
+        text("paperPortfolio", `配置资金 ${fmt(budget,2)} 份 · 累计买入支出 ${fmt(row.paper_total_buy_cost,4)} · 卖出回收 ${fmt(row.paper_total_sell_proceeds,4)} · 手续费 ${fmt(row.paper_fees_paid,4)} · 现金 ${fmt(row.paper_cash,4)} · 已实现 ${fmt(realized,4)} · 未实现 ${fmt(row.paper_unrealized_pnl,4)} · 总盈亏 ${fmt(pnl,4)} · 资金收益率 ${pnl == null || !budget ? "未知" : pct(pnl/budget)} · 已计算范围成交 ${marketSummary?.paper_fill_action_count ?? "-"} 笔 · ${entryLabels[row.paper_entry_status] || "原策略"} · 指定 ${row.paper_entry_requested_utc || "自动"} · 实际 ${row.paper_entry_actual_utc || "待成交"}`);
+        $("paperPortfolio").textContent += ` · 当前资产 ${pnl == null || budget == null ? "未知" : fmt(budget+pnl,4)} · 未成交尝试 ${marketSummary?.paper_attempt_count ?? "-"} 笔`;
+        if (state.revealed && row.paper_settlement_actions) {
+          history.push(...row.paper_settlement_actions.map(a=>({...a,checkpoint:row.paper_settlement_time_utc})));
+          text("paperSettlement", `到期结算 ${row.paper_settlement_time_utc} · 最终现金 ${fmt(row.paper_cash_after_settlement,4)} · 最终盈亏 ${fmt(row.paper_final_pnl,4)} · 投入回报率 ${pct(row.paper_final_return)} · 资金收益率 ${budget ? pct(row.paper_final_pnl/budget) : "-"}`);
+        } else if (row.paper_settlement_actions) text("paperSettlement", "到期结算：待揭晓");
+        else if (state.index === currentRows().length-1 && marketSummary?.paper_mode === "mandatory_entry") text("paperSettlement", "未结算：官方结果缺失或读取范围尚未到期");
+        const reasonLabels = {mandatory_entry:"指定节点强制买入",enter:"优势达到建仓阈值",increase_high_edge:"优势达到增持阈值",take_profit:"达到止盈阈值",stop_loss:"达到止损阈值",exit_edge_below_zero:"成本后优势不大于0，全退",reduce_below_retain:"成本后优势低于4%，减仓",settlement:"官方结果到期兑付",hold_hysteresis:"状态机保持",hold_data_insufficient:"盘口不足，保持"};
+        text("paperHistoryNote", `截至 ${row.checkpoint_utc}；共 ${history.length} 条已成交或已揭晓结算记录（含日期范围之前）`);
+        $("paperActionBody").innerHTML = history.map((item) =>
+          `<tr><td>${escapeHtml(item.checkpoint)}</td><td>${escapeHtml(item.outcome_label)}</td><td>${paperActionLabel(item)}</td><td>${fmt(Math.abs(item.quantity_delta), 4)} / ${fmt(Math.abs(item.requested_quantity_delta),4)}</td><td>${fmt(item.position_after, 4)}</td><td>${fmt(item.execution_price,4)} / ${fmt(item.average_cost,4)}</td><td>${fmt(item.fee_paid,4)}</td><td>${fmt(item.cash_flow,4)}</td><td>${fmt(item.realized_pnl_delta,4)}</td><td>${fmt(item.realized_pnl,4)}</td><td>${item.quantity_delta < 0 ? pct(item.holding_return) : "-"}</td><td>${escapeHtml(reasonLabels[item.reason] || item.reason || "-")} · edge ${pct(item.edge_after_cost)}${item.reason === "take_profit" ? " · 阈值 "+pct(item.take_profit_return) : item.reason === "stop_loss" ? " · 阈值 "+pct(item.stop_loss_return) : ""}</td></tr>`
+        ).join("") || '<tr><td colspan="12">截至当前检查点没有已成立的纸面交易</td></tr>';
+      }
+
+      function renderBacktest(review) {
+        state.backtest = review || null;
+        const records = Array.isArray(review?.records) ? review.records : [];
+        const summary = review?.summary || {};
+        text("backtestMarkets", summary.markets || 0);
+        text("backtestRecords", summary.records || records.length || 0);
+        text("backtestCandidates", summary.paper_candidate_checkpoints || 0);
+        text("backtestMeanEdge", summary.mean_model_market_edge == null ? "-" : pct(summary.mean_model_market_edge));
+        text("backtestMeanNetEdge", summary.mean_paper_net_edge_after_cost == null ? "-" : pct(summary.mean_paper_net_edge_after_cost));
+        text("backtestMeanScores", state.revealed ? `${fmt(summary.mean_brier_score, 4)} / ${fmt(summary.mean_log_loss, 4)}` : "揭晓后显示");
+        text("backtestPaceBrierDelta", state.revealed ? fmt(summary.mean_model_vs_local_pace_brier_delta, 4) : "揭晓后显示");
+        text("backtestMarketBrierDelta", state.revealed ? fmt(summary.mean_model_vs_market_brier_delta, 4) : "揭晓后显示");
+        const settledMarkets = summary.markets_with_settlement || 0;
+        const cost = review?.methodology?.cost_model || {};
+        const hash = review?.model_hash_sha256 || "-";
+        const coverage = review?.data_quality || {};
+        $("backtestRunInfo").textContent = `运行 ID：${review?.backtest_run_id || "-"}；模型 SHA-256：${hash}; 已结算市场：${settledMarkets}；结算评分检查点：${coverage.records_with_settlement_score || 0}；模型/本地速度配对：${coverage.paired_model_local_pace_score_records || 0}；模型/市场配对：${coverage.paired_model_market_score_records || 0}；纸面成本：费率 ${pct(cost.fee_rate)}，滑点 ${fmt(cost.slippage_bps, 1)} bps，名义数量 ${fmt(cost.paper_size, 2)}。Brier/Log Loss 越低越好，但不是盈利证明。`;
+        const completeness = review.coverage || {};
+        $("backtestRunInfo").textContent += ` Data filter: complete_for_profitability; eligible ${completeness.eligible_market_count || 0}/${completeness.requested_market_count || 0}; excluded incomplete ${completeness.excluded_market_count || 0}.`;
+        const calibrationBins = Array.isArray(review?.calibration?.bins) ? review.calibration.bins : [];
+        const nonEmptyCalibration = calibrationBins.filter((item) => item && item.records > 0);
+        $("backtestCalibration").textContent = !state.revealed
+          ? "概率校准：揭晓结算后显示。"
+          : nonEmptyCalibration.length
+            ? `概率校准（已结算检查点 ${review?.calibration?.resolved_checkpoint_records || 0}）：${nonEmptyCalibration.map((item) => `${pct(item.lower)}-${pct(item.upper)} 预测 ${pct(item.mean_predicted_probability)} / 命中 ${pct(item.observed_hit_rate)} / 差距 ${pct(item.absolute_calibration_gap)}`).join("；")}`
+            : "概率校准：暂无本地已结算检查点；空分桶仍保留在回测 DTO 中。";
+        $("backtestStatus").className = `badge ${records.length ? "good" : "neutral"}`;
+        text("backtestStatus", records.length ? "已读取" : "无记录");
+        const coverageNote = review.coverage?.truncated
+          ? `已载入 ${review.coverage.loaded_checkpoint_count || records.length}/${review.coverage.total_checkpoint_count || "?"} 个区间，当前上限造成截断。`
+          : `完整载入 ${review.coverage?.total_checkpoint_count || records.length} 个区间。`;
+        $("backtestSummary").textContent = records.length
+          ? `固定模型复放，${coverageNote}步长 ${review.coverage?.checkpoint_step_minutes || 5} 分钟；汇总深度模拟${review.methodology?.probability_policy ? "；已启用早期速度与尾部概率风险约束（非校准模型）" : ""}。`
+          : "指定范围没有可用的已结束市场或本地记录。";
+      }
+
+      function loadBacktest() {
+        loadUnifiedHistory($("marketSelect").value);
+      }
+
       function renderHistorySync(sync) {
         const stateLabel = sync && sync.state ? sync.state : "idle";
-        const labels = { idle: "未启动", running: "抓取中", succeeded: "已完成", failed: "失败" };
+        const labels = { idle: "未启动", running: "抓取中", succeeded: "请求完成", sparse: "请求完成 · 记录稀疏", partial: "部分请求失败", failed: "失败" };
         text("historySyncStatus", labels[stateLabel] || stateLabel);
         $("historySyncStatus").className = `badge ${stateLabel === "failed" ? "bad" : stateLabel === "succeeded" ? "good" : stateLabel === "running" ? "warn" : "neutral"}`;
         if (!sync) return;
         const progress = `${sync.completed || 0}/${sync.total || 0}`;
+        const qualityLabels = {complete:"覆盖完整", sparse:"记录稀疏", empty:"无对应精度记录", partial:"部分请求失败"};
+        text("historyCoverageDetail", (sync.results||[]).map(r=>`${r.slug} · ${qualityLabels[r.status]|| (r.ok ? "完成" : "失败")}\n${(r.price_coverage||[]).map(c=>`盘口 ${c.market_id||c.token_id}：${c.covered_buckets}/${c.expected_buckets} 个区间 · ${qualityLabels[c.status]||c.status} · 请求 ${c.request_count||0}${c.cache_used ? "（使用近期核验）" : ""}`).join("\n")}\n${[...(r.error_details||[]),...(r.quality_warnings||[])].map(e=>e.message||e.error).join("\n")}${r.message||""}`).join("\n\n"));
         const current = sync.current_slug ? `当前：${sync.current_slug}` : "";
-        const outcome = `成功 ${sync.succeeded || 0}，失败 ${sync.failed || 0}`;
-        $("historySyncDetail").textContent = `${sync.message || ""} ${progress}。${outcome}。${current}`.trim();
+        const incompleteCount = (sync.results || []).filter(r => ["sparse", "empty"].includes(r.status)).length;
+        const outcome = `已返回 ${sync.succeeded || 0}（记录稀疏/空 ${incompleteCount}），市场失败 ${sync.failed || 0}`;
+        const fidelity = sync.include_prices ? `研究步长 ${sync.price_fidelity_minutes || 5} 分钟，保留源实际精度` : "未抓取历史价格";
+        const orderbooks = sync.include_orderbooks ? "订单簿：从任务启动后追加未来快照" : "未采集订单簿";
+        const failures = Array.isArray(sync.results) ? sync.results.filter((item) => item && (item.ok === false || item.status === "partial")) : [];
+        const failureDetail = failures.length
+          ? `失败明细：${failures.slice(0, 3).map((item) => {
+              const reason = item.failure_reason === "market_not_found" ? "市场不存在（Gamma 404）" : (item.failure_reason || item.error || "部分来源请求失败");
+              const coverage=(item.price_coverage||[]).reduce((a,c)=>[a[0]+c.covered_buckets,a[1]+c.expected_buckets],[0,0]);
+              return `${item.slug || "未知市场"}（${reason}；价格覆盖 ${coverage[0]}/${coverage[1]}；${(item.error_details||[]).slice(0,2).map(e=>e.message||e.error).join("；")}）`;
+            }).join("；")}${failures.length > 3 ? "；其余见任务结果" : ""}`
+          : "";
+        const p = sync.market_progress;
+        const tokenProgress = p?.total_tokens ? `盘口 ${p.completed_tokens}/${p.total_tokens}，请求 ${p.request_count}，新增价格 ${p.new_price_rows}，耗时 ${p.elapsed_seconds}s` : "";
+        $("historySyncDetail").textContent = `${sync.message || ""} ${progress}。${outcome}。${fidelity}。${orderbooks}。${current} ${tokenProgress} ${failureDetail}`.trim();
+        ["historyPriceFidelity", "historyForcePrices"].forEach(id => $(id).disabled = stateLabel === "running" || state.historyBusy);
         $("startHistorySyncButton").disabled = stateLabel === "running" || state.historyBusy;
+        const formatLocked = stateLabel === "running";
+        ["historyStartDate", "historyEndDate", "historyIncludePrices", "historyIncludeOrderbooks", "historyPriceInterval", "historyRebuildReports"].forEach((id) => {
+          const node = $(id);
+          if (node) node.disabled = formatLocked;
+        });
         if (stateLabel === "succeeded" && sync.report_result && sync.report_result.ok && sync.finished_at_utc !== state.lastAutoReportFinish) {
           state.lastAutoReportFinish = sync.finished_at_utc;
           loadFixedPublicReport();
@@ -1170,6 +2129,10 @@
         if (state.historyBusy) return;
         state.historyBusy = true;
         $("startHistorySyncButton").disabled = true;
+        ["historyStartDate", "historyEndDate", "historyIncludePrices", "historyIncludeOrderbooks", "historyPriceInterval", "historyRebuildReports"].forEach((id) => {
+          const node = $(id);
+          if (node) node.disabled = true;
+        });
         $("historySyncDetail").textContent = "正在提交历史抓取任务…";
         try {
           const response = await fetch(historyEndpoint("/api/history-sync"), {
@@ -1179,6 +2142,9 @@
               start: $("historyStartDate").value,
               end: $("historyEndDate").value,
               include_prices: $("historyIncludePrices").checked,
+              price_fidelity_minutes: Number($("historyPriceFidelity").value),
+              force_prices: $("historyForcePrices").checked,
+              include_orderbooks: $("historyIncludeOrderbooks").checked,
               price_interval: $("historyPriceInterval").value,
               rebuild_reports: $("historyRebuildReports").checked
             }),
@@ -1195,6 +2161,12 @@
         } finally {
           state.historyBusy = false;
           if (!state.historyTimer) $("startHistorySyncButton").disabled = false;
+          if (!state.historyTimer) {
+            ["historyStartDate", "historyEndDate", "historyIncludePrices", "historyIncludeOrderbooks", "historyPriceInterval", "historyRebuildReports"].forEach((id) => {
+              const node = $(id);
+              if (node) node.disabled = false;
+            });
+          }
         }
       }
 
@@ -1203,7 +2175,7 @@
           const response = await fetch(reportEndpoint("status"), { cache: "no-store" });
           const payload = await response.json();
           if (!response.ok || payload.ok === false) throw new Error(payload.message || "固定复盘状态读取失败");
-          if (payload.public && payload.public.exists) await loadFixedPublicReport();
+          if (payload.public && payload.public.exists) text("localReportStatus", "固定 CSV 已就绪");
           else text("localReportStatus", "固定公开复盘尚未生成；可在历史市场自动抓取中勾选“生成三份固定 CSV”");
         } catch (error) {
           text("localReportStatus", `固定复盘状态读取失败：${error.message}`);
@@ -1261,10 +2233,91 @@
 
       function stopLive() {
         if (state.liveTimer) clearInterval(state.liveTimer);
+        if (state.researchTimer) clearInterval(state.researchTimer);
         state.liveTimer = null;
+        state.researchTimer = null;
         $("startLiveButton").disabled = false;
         $("stopLiveButton").disabled = true;
         $("liveStatus").textContent = "实时监控已停止";
+      }
+
+      async function clearBrowserCache() {
+        const detail = "将清除：名称以 aiprp: 开头的 localStorage/sessionStorage 项，以及名称以 aiprp- 开头的 Cache API 缓存。\n不会清除：其他站点缓存、SQLite、live_market_snapshots、CSV/JSONL、原始帖子、订单簿或模型文件。\n\n确认继续？";
+        if (!window.confirm(detail)) return;
+        let removed = 0;
+        try {
+          const keys = [];
+          for (let i = 0; i < window.localStorage.length; i += 1) {
+            const key = window.localStorage.key(i);
+            if (key && key.startsWith("aiprp:")) keys.push(key);
+          }
+          keys.forEach((key) => {
+            window.localStorage.removeItem(key);
+            removed += 1;
+          });
+        } catch (_) {}
+        try {
+          const keys = [];
+          for (let i = 0; i < window.sessionStorage.length; i += 1) {
+            const key = window.sessionStorage.key(i);
+            if (key && key.startsWith("aiprp:")) keys.push(key);
+          }
+          keys.forEach((key) => {
+            window.sessionStorage.removeItem(key);
+            removed += 1;
+          });
+        } catch (_) {}
+        if (window.caches && typeof window.caches.keys === "function") {
+          try {
+            const names = await window.caches.keys();
+            for (const name of names) {
+              if (name.startsWith("aiprp-") && await window.caches.delete(name)) removed += 1;
+            }
+          } catch (_) {}
+        }
+        text("localReportStatus", removed ? `已清除 ${removed} 项本应用浏览器缓存；本地采集文件未受影响` : "当前没有可清理的应用缓存；本地采集文件未受影响");
+      }
+
+      async function organizeDataFiles(action) {
+        const status = $("dataOrganizerStatus");
+        const detail = $("dataOrganizerDetail");
+        status.textContent = action === "consolidate" ? "正在生成合并副本，源文件不会删除……" : "正在扫描本地数据文件……";
+        try {
+          const endpointFor = (name) => historyEndpoint(`/api/data-organizer/${name}`);
+          let body = {};
+          if (action === "delete") {
+            const scan = await fetch(endpointFor("scan"), {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}", cache: "no-store"});
+            const scanPayload = await readJsonResponse(scan, "数据文件扫描");
+            const inventory = scanPayload.result || scanPayload;
+            const groups = (inventory.exact_duplicate_groups || []).filter(group => group.deletion_allowed);
+            const deletable = groups.flatMap(group => group.deletable_paths || []);
+            if (!groups.length || !deletable.length) {
+              status.textContent = "没有可安全删除的完全重复副本；受保护文件未触碰";
+              detail.textContent = JSON.stringify(scanPayload, null, 2);
+              return;
+            }
+            const bytes = groups.reduce((total, group) => total + (group.deletable_paths || []).length, 0);
+            if (!window.confirm(`将删除 ${deletable.length} 个逐字节完全相同的低风险文本副本，保留每组规范副本。不会删除 SQLite、订单簿、原始帖子、模型、备份、测试或验证文件。继续？`)) return;
+            body = {sha256: groups.map(group => group.sha256)};
+          }
+          const response = await fetch(endpointFor(action), {
+            method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body), cache: "no-store"
+          });
+          const payload = await readJsonResponse(response, `数据文件${action === "scan" ? "扫描" : action === "consolidate" ? "合并" : "删除"}`);
+          const result = payload.result || payload;
+          const inventory = result.inventory || result;
+          const exact = (inventory.exact_duplicate_groups || []).length;
+          const merge = (inventory.merge_candidates || []).length;
+          status.textContent = action === "delete"
+            ? `已删除 ${(result.deletion || {}).deleted?.length || 0} 个安全重复副本，释放 ${((result.deletion || {}).bytes_freed || 0).toLocaleString()} 字节；受保护文件未触碰`
+            : action === "consolidate"
+            ? `已生成合并副本；发现 ${exact} 组完全重复、${merge} 组可合并；源文件未删除`
+            : `扫描完成：${inventory.file_count || 0} 个文件，${exact} 组完全重复、${merge} 组可合并；仅低风险完全重复副本可申请删除`;
+          detail.textContent = JSON.stringify(payload, null, 2);
+        } catch (error) {
+          status.textContent = `数据整理失败：${error.message || error}`;
+          detail.textContent = `请求地址：${historyEndpoint(`/api/data-organizer/${action}`).toString()}\n${error.stack || error.message || error}`;
+        }
       }
 
       function startLive() {
@@ -1273,11 +2326,13 @@
         $("startLiveButton").disabled = true;
         $("stopLiveButton").disabled = false;
         pullLive();
-        state.liveTimer = setInterval(pullLive, Math.max(10, Number($("liveInterval").value) || 30) * 1000);
+        pullResearchStatus();
+        state.liveTimer = setInterval(pullLive, Math.max(300, Number($("liveInterval").value) || 300) * 1000);
+        state.researchTimer = setInterval(pullResearchStatus, 30000);
       }
 
       function currentRows() {
-        return state.marketRows.get(state.market) || [];
+        return state.replayRows.get(state.market) || state.marketRows.get(state.market) || [];
       }
 
       function currentRow() {
@@ -1289,8 +2344,22 @@
       }
 
       function privateRowFor(row) {
-        const match = state.privateRows.find((candidate) => rowKey(candidate) === rowKey(row));
-        return match ? { ...row, ...match } : row;
+        if (!row) return null;
+        const match = state.privateByKey.get(rowKey(row));
+        if (!row || !match) return row;
+        const merged = { ...row, ...match };
+        [
+          "brier_score", "log_loss", "forecast_bin", "forecast_bin_probability",
+          "bin_probabilities_json", "price_snapshot_json", "orderbook_snapshot_json",
+          "outcome_market_rows", "market_expected_count", "market_implicit_probability",
+          "price_probability_mass", "price_distribution_valid", "price_snapshot_time_utc",
+          "orderbook_snapshot_time_utc", "model_market_edge", "paper_net_edge_after_cost",
+          "best_bid", "best_ask", "spread", "ask_depth_5", "current_count",
+          "model_forecast_final_count", "elapsed_hours", "remaining_hours", "checkpoint_step_minutes",
+        ].forEach((key) => {
+          if (row[key] != null && row[key] !== "") merged[key] = row[key];
+        });
+        return merged;
       }
 
       function signalFor(row) {
@@ -1316,10 +2385,63 @@
         } catch (error) {
           probabilities = {};
         }
+        let market = {};
+        try {
+          const prices = JSON.parse(row.price_snapshot_json || "[]");
+          const valid = prices.filter((item) => item && item.outcome_label && number(item.price) != null);
+          const mass = valid.reduce((sum, item) => sum + Math.max(0, number(item.price)), 0);
+          if (mass > 0) valid.forEach((item) => { market[item.outcome_label] = Math.max(0, number(item.price)) / mass; });
+        } catch (error) { market = {}; }
+        let books = {};
+        try {
+          const orderbooks = JSON.parse(row.orderbook_snapshot_json || "[]");
+          orderbooks.forEach((item) => { if (item && item.outcome_label) books[item.outcome_label] = item; });
+        } catch (error) { books = {}; }
         const entries = Object.entries(probabilities);
         $("binProbabilityBody").innerHTML = entries.map(([label, probability]) =>
-          `<tr><td>${escapeHtml(label)}</td><td>${pct(probability)}</td></tr>`
-        ).join("") || `<tr><td colspan="2">当前 CSV 没有完整区间概率字段，请重新生成 fullprob 报告</td></tr>`;
+          `<tr><td>${escapeHtml(label)}</td><td>${pct(probability)}</td><td>${market[label] == null ? "-" : pct(market[label])}</td><td>${books[label] && books[label].best_ask != null && probability != null ? pct(number(probability) - number(books[label].best_ask)) : "-"}</td></tr>`
+        ).join("") || `<tr><td colspan="4">当前 CSV 没有完整区间概率字段，请重新生成 fullprob 报告</td></tr>`;
+      }
+
+      function renderHistoricalMarketRows(row) {
+        const outcomes = Array.isArray(row?.outcome_market_rows) ? row.outcome_market_rows : [];
+        if (!outcomes.length) {
+          $("historyMarketBody").innerHTML = '<tr><td colspan="8">当前 5 分钟区间没有历史价格或订单簿归档</td></tr>';
+          return;
+        }
+        $("historyMarketBody").innerHTML = outcomes.map((item) => {
+          const flags = Array.isArray(item.quality_flags) ? item.quality_flags : [];
+          const status = item.quality_status === "ok"
+            ? "可用于纸面 edge"
+            : item.quality_status === "audit_only"
+              ? (flags.includes("price_backfilled_after_checkpoint")
+                ? "事后补采历史价，仅供复盘"
+                : "仅归档审计：缺来源时间")
+              : flags.includes("missing_price_snapshot") && flags.includes("missing_orderbook_snapshot")
+                ? "当前 5 分钟区间无价格或盘口样本"
+                : flags.includes("missing_price_snapshot") ? "当前 5 分钟区间无价格样本" : "该时段未采集订单簿";
+          const resolution = number(item.price_resolution_seconds);
+          const resolutionText = resolution > 0 ? ` · 源采样 ${fmt(resolution / 60, 0)} 分钟${item.price_coarser_than_review_window ? "（粗于当前区间）" : ""}` : "";
+          const acquisitionLabels = {available:"有目标精度样本",attempted_missing:"已尝试但缺失",fetch_failed:"抓取失败",not_attempted:"尚未尝试／无尝试记录",evidence_insufficient:"证据不足",read_error:"读取异常"};
+          const acquisitionStatus = item.price_acquisition_status || "evidence_insufficient";
+          const acquisitionLabel = acquisitionLabels[acquisitionStatus] || "证据不足";
+          const evidence = item.price_acquisition_evidence;
+          const targetMinutes = (item.price_target_seconds || 300) / 60;
+          const errors = (evidence?.errors || []).map(error=>[error.stage,error.http_status,error.error_code,error.message,error.trace_id ? "trace "+error.trace_id : null].filter(Boolean).join(" · ")).join("；");
+          const detail = [acquisitionStatus === "attempted_missing" ? `已尝试获取${targetMinutes}分钟数据，本次响应未提供该区间目标样本` : acquisitionLabel,
+            evidence?.finished_at_utc ? "上次尝试："+evidence.finished_at_utc : null,
+            evidence?.start && evidence?.end ? `请求范围：${evidence.start} 至 ${evidence.end}` : null,
+            evidence?.unique_rows != null ? "去重返回："+evidence.unique_rows : null,
+            evidence?.resolutions?.length ? "响应精度（秒）："+evidence.resolutions.join(", ") : null,
+            evidence?.evidence_kind === "legacy_success_receipt" ? "旧成功核验，未保存详细响应" : null,
+            errors || null].filter(Boolean).join("；");
+          const acquisitionText = `<small title="${escapeHtml(detail)}">${escapeHtml(acquisitionLabel)}${evidence?.finished_at_utc ? " · "+escapeHtml(evidence.finished_at_utc) : ""}</small>`;
+          const priceText = (item.latest_price == null ? `当前 ${targetMinutes} 分钟区间无价格样本` : `${pct(item.latest_price)}<br><small>${pct(item.price_min)}~${pct(item.price_max)}（${item.price_sample_count || 0}）${item.price_source === "archived_book_midpoint" ? " · 盘口中间价代理" : resolutionText}${item.price_review_only ? " · 仅供复盘" : ""}</small>`) + `<br>${acquisitionText}`;
+          const bookText = item.best_bid == null && item.best_ask == null ? (item.orderbook_snapshot_count ? "盘口无有效双边报价" : "未采集订单簿") : `${pct(item.best_bid)} / ${pct(item.best_ask)}`;
+          const spreadText = item.spread == null ? (item.orderbook_snapshot_count ? "盘口价差无效" : "未采集订单簿") : pct(item.spread);
+          const depthText = item.bid_depth_5 == null && item.ask_depth_5 == null ? (item.orderbook_snapshot_count ? "盘口深度无效" : "未采集订单簿") : `${fmt(item.bid_depth_5, 1)} / ${fmt(item.ask_depth_5, 1)}`;
+          return `<tr><td>${escapeHtml(item.outcome_label || "-")}</td><td>${pct(item.model_probability)}</td><td>${pct(item.market_probability)}</td><td>${priceText}</td><td>${bookText}</td><td>${spreadText}</td><td>${depthText}</td><td>${pct(item.model_market_edge)} / ${pct(item.paper_net_edge_after_cost)}<br><small>${escapeHtml(status)}</small></td></tr>`;
+        }).join("");
       }
 
       function officialMidpoint(row) {
@@ -1328,156 +2450,113 @@
         return lower == null || upper == null ? null : (lower + upper) / 2;
       }
 
-      function drawResidualChart(rows) {
-        const section = $("residualSection");
-        const canvas = $("residualChart");
-        if (!section || !canvas) return;
-        const canReveal = state.revealed && state.privateRows.length > 0;
-        section.classList.toggle("hidden", !canReveal);
-        if (!canReveal) return;
-
-        const residuals = rows.map((item) => {
-          const merged = privateRowFor(item);
-          const forecast = number(merged.model_forecast_final_count);
-          const midpoint = officialMidpoint(merged);
-          return forecast == null || midpoint == null ? null : forecast - midpoint;
-        });
-        const usable = residuals.filter((value) => value != null);
-        if (!usable.length) {
-          const ratio = window.devicePixelRatio || 1;
-          const width = Math.max(320, canvas.clientWidth || 760);
-          canvas.width = width * ratio;
-          canvas.height = 280 * ratio;
-          $("residualNote").textContent = "该市场没有带上下界的官方结算区间，无法计算区间中点代理残差。";
-          return;
+      function drawInteractiveChart(id, points, series, noteId) {
+        const canvas = $(id);
+        let tooltip = canvas.parentElement.querySelector(".chart-tooltip");
+        if (!tooltip) {
+          tooltip = document.createElement("div");
+          tooltip.className = "chart-tooltip hidden";
+          tooltip.setAttribute("role", "status");
+          canvas.parentElement.appendChild(tooltip);
         }
-
-        const width = Math.max(320, canvas.clientWidth || 760);
-        const height = 280;
+        tooltip.classList.add("hidden");
+        canvas.onpointermove = canvas.onpointerleave = canvas.onpointerup = canvas.onpointercancel = null;
+        const width = Math.max(280, canvas.clientWidth || 760), height = 280;
         const ratio = window.devicePixelRatio || 1;
-        canvas.width = width * ratio;
-        canvas.height = height * ratio;
+        canvas.width = width * ratio; canvas.height = height * ratio;
         const ctx = canvas.getContext("2d");
         ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-        ctx.clearRect(0, 0, width, height);
-        const margin = { left: 54, right: 18, top: 18, bottom: 34 };
-        const plotWidth = width - margin.left - margin.right;
-        const plotHeight = height - margin.top - margin.bottom;
-        const maxAbsolute = Math.max(1, ...usable.map((value) => Math.abs(value))) * 1.12;
-        const x = (index) => margin.left + (rows.length <= 1 ? 0 : index / (rows.length - 1)) * plotWidth;
-        const y = (value) => margin.top + plotHeight / 2 - (value / maxAbsolute) * (plotHeight / 2);
-
-        ctx.font = "11px sans-serif";
-        ctx.lineWidth = 1;
-        ctx.strokeStyle = "#d7e0e7";
-        ctx.fillStyle = "#60717c";
-        for (let tick = -2; tick <= 2; tick += 1) {
-          const value = maxAbsolute * tick / 2;
-          const lineY = y(value);
-          ctx.beginPath();
-          ctx.moveTo(margin.left, lineY);
-          ctx.lineTo(width - margin.right, lineY);
-          ctx.stroke();
-          ctx.fillText(`${value > 0 ? "+" : ""}${Math.round(value)}`, 8, lineY + 4);
+        const left = 52, right = width - 18, top = 18, bottom = height - 38;
+        const times = points.map(p => Date.parse(p.checkpoint_utc));
+        const values = points.flatMap(p => series.map(line => p[line.key])).filter(v => v != null && Number.isFinite(v));
+        if (!points.length || !values.length) {
+          text(noteId, "没有可绘制的数据"); return;
         }
-        const zeroY = y(0);
-        ctx.beginPath();
-        ctx.strokeStyle = "#60717c";
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([5, 4]);
-        ctx.moveTo(margin.left, zeroY);
-        ctx.lineTo(width - margin.right, zeroY);
-        ctx.stroke();
-        ctx.setLineDash([]);
-
-        ctx.beginPath();
-        ctx.strokeStyle = "#60717c";
-        ctx.lineWidth = 1.5;
-        let started = false;
-        residuals.forEach((value, index) => {
-          if (value == null) {
-            started = false;
-            return;
+        const minTime = Math.min(...times), maxTime = Math.max(...times);
+        const lo = Math.min(0, ...values), hi = Math.max(1, ...values);
+        const span = Math.max(1, hi - lo);
+        const x = i => left + (maxTime === minTime ? 0.5 : (times[i] - minTime) / (maxTime - minTime)) * (right - left);
+        const y = v => bottom - (v - lo) / span * (bottom - top);
+        const redraw = index => {
+          ctx.clearRect(0, 0, width, height);
+          ctx.font = "11px sans-serif"; ctx.lineWidth = 1;
+          for (let tick = 0; tick <= 4; tick++) {
+            const value = lo + span * tick / 4;
+            ctx.strokeStyle = "#d7e0e7"; ctx.beginPath();ctx.moveTo(left,y(value));ctx.lineTo(right,y(value));ctx.stroke();
+            ctx.fillStyle = "#60717c";ctx.fillText(fmt(value,1),2,y(value)+4);
           }
-          if (!started) {
-            ctx.moveTo(x(index), y(value));
-            started = true;
-          } else {
-            ctx.lineTo(x(index), y(value));
+          ctx.strokeStyle = "#60717c";ctx.beginPath();ctx.moveTo(left,y(0));ctx.lineTo(right,y(0));ctx.stroke();
+          series.forEach(line => {
+            ctx.strokeStyle = line.color;ctx.lineWidth = 2;ctx.setLineDash(line.dash || []);
+            ctx.beginPath();let started = false;
+            points.forEach((p,i) => {
+              const value=p[line.key];if(value==null){started=false;return;}
+              if(started)ctx.lineTo(x(i),y(value));else {ctx.moveTo(x(i),y(value));started=true;}
+            });
+            ctx.stroke();ctx.setLineDash([]);
+          });
+          ctx.fillStyle="#60717c";
+          ctx.fillText(points[0].checkpoint_utc.slice(5,16),left,height-10);
+          const last=points.at(-1).checkpoint_utc.slice(5,16);
+          ctx.fillText(last,right-ctx.measureText(last).width,height-10);
+          if(index!=null){
+            ctx.strokeStyle="#52606d";ctx.setLineDash([3,3]);ctx.beginPath();ctx.moveTo(x(index),top);ctx.lineTo(x(index),bottom);ctx.stroke();ctx.setLineDash([]);
+            series.forEach(line => {const value=points[index][line.key];if(value==null)return;ctx.fillStyle=line.color;ctx.beginPath();ctx.arc(x(index),y(value),4,0,Math.PI*2);ctx.fill();});
           }
-        });
-        ctx.stroke();
-        residuals.forEach((value, index) => {
-          if (value == null) return;
-          ctx.beginPath();
-          ctx.fillStyle = value > 0 ? "#b33a3a" : value < 0 ? "#1769aa" : "#2f8f67";
-          ctx.arc(x(index), y(value), 3, 0, Math.PI * 2);
-          ctx.fill();
-        });
-        ctx.fillStyle = "#60717c";
-        ctx.fillText(rows[0]?.checkpoint_utc?.slice(5, 16) || "起点", margin.left, height - 10);
-        const endLabel = rows[rows.length - 1]?.checkpoint_utc?.slice(5, 16) || "终点";
-        ctx.fillText(endLabel, Math.max(margin.left, width - margin.right - ctx.measureText(endLabel).width), height - 10);
-        $("residualNote").textContent = "残差 = 当时模型预测最终数 - 官方结算区间中点。正值表示高估，负值表示低估；它不是相对精确官方最终数的误差。开放尾部区间因没有可靠中点会留空。";
+        };
+        const hide=()=>{tooltip.classList.add("hidden");redraw(null);};
+        canvas.onpointermove = event => {
+          const rect=canvas.getBoundingClientRect();
+          const px=(event.clientX-rect.left)*width/rect.width, py=(event.clientY-rect.top)*height/rect.height;
+          if(px<left||px>right||py<top||py>bottom){hide();return;}
+          const index=points.reduce((best,p,i)=>Math.abs(x(i)-px)<Math.abs(x(best)-px)?i:best,0);
+          const p=points[index];
+          tooltip.textContent=[
+            p.slug, "北京时间："+new Intl.DateTimeFormat("zh-CN",{timeZone:"Asia/Shanghai",dateStyle:"short",timeStyle:"medium"}).format(new Date(p.checkpoint_utc)),
+            "UTC："+new Date(p.checkpoint_utc).toISOString(),
+            ...series.map(line=>line.label+"："+(p[line.key]==null?"不可计算":fmt(p[line.key],3))),
+            ...(p.details || [])
+          ].join("\n");
+          tooltip.classList.remove("hidden");
+          tooltip.style.maxWidth=Math.max(180,canvas.parentElement.clientWidth-16)+"px";
+          const wrap=canvas.parentElement.getBoundingClientRect();
+          tooltip.style.left=Math.max(0,Math.min(event.clientX-wrap.left+12,wrap.width-tooltip.offsetWidth-8))+"px";
+          tooltip.style.top=Math.max(0,Math.min(event.clientY-wrap.top+12,window.innerHeight-wrap.top-tooltip.offsetHeight-8))+"px";
+          redraw(index);
+        };
+        canvas.onpointerleave=canvas.onpointercancel=hide;
+        canvas.onpointerup=event=>{if(event.pointerType!=="mouse")hide();};
+        redraw(null);
+        text(noteId,series.map(line=>line.label).join("；")+"。悬停查看最近记录；缺失值不插值。");
       }
 
+      function chartPoint(item) {
+        const row=privateRowFor(item);
+        const forecast=number(row.model_forecast_final_count);
+        const actual=state.revealed ? number(row.observed_local_final_count) : null;
+        const midpoint=state.revealed ? officialMidpoint(row) : null;
+        const residual=forecast!=null&&actual!=null?forecast-actual:null;
+        return {slug:row.slug,checkpoint_utc:item.checkpoint_utc,forecast,
+          observed:number(row.current_count),actual,
+          actualResidual:residual,midpointResidual:forecast!=null&&midpoint!=null?forecast-midpoint:null,
+          details:["已过 / 剩余小时："+fmt(row.elapsed_hours,2)+" / "+fmt(row.remaining_hours,2),
+            ...(state.revealed?["本地最终观测："+fmt(actual),"官方区间中点代理："+fmt(midpoint),
+              "结果残差："+(residual==null?"不可计算":fmt(residual,3)),
+              "绝对误差："+(residual==null?"不可计算":fmt(Math.abs(residual),3))]:["结果残差：揭晓后显示"])]};
+      }
+      const residualSeries = [
+        {key:"actualResidual",label:"预测 − 本地最终观测",color:"#b33a3a"},
+        {key:"midpointResidual",label:"预测 − 官方区间中点代理",color:"#9a6500",dash:[6,4]}
+      ];
+      function drawResidualChart(rows) {
+        $("residualSection").classList.toggle("hidden",!state.revealed);
+        drawInteractiveChart("residualChart",state.revealed?rows.map(chartPoint):[],residualSeries,"residualNote");
+      }
       function drawHistoryChart(rows) {
-        const canvas = $("historyChart");
-        if (!canvas) return;
-        const width = Math.max(320, canvas.clientWidth || 760);
-        const height = 280;
-        const ratio = window.devicePixelRatio || 1;
-        canvas.width = width * ratio;
-        canvas.height = height * ratio;
-        const ctx = canvas.getContext("2d");
-        ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-        ctx.clearRect(0, 0, width, height);
-        const margin = { left: 48, right: 18, top: 18, bottom: 34 };
-        const plotWidth = width - margin.left - margin.right;
-        const plotHeight = height - margin.top - margin.bottom;
-        const prediction = rows.map((item) => number(item.model_forecast_final_count));
-        const observed = rows.map((item) => number(item.current_count));
-        const revealedRow = state.revealed && state.privateRows.length ? privateRowFor(rows[0]) : null;
-        const revealedFinal = revealedRow ? number(revealedRow.observed_local_final_count) : null;
-        const values = [...prediction, ...observed, revealedFinal].filter((value) => value != null);
-        if (!values.length) return;
-        const maxValue = Math.max(1, ...values) * 1.08;
-        const x = (index) => margin.left + (rows.length <= 1 ? 0 : index / (rows.length - 1)) * plotWidth;
-        const y = (value) => margin.top + plotHeight - (value / maxValue) * plotHeight;
-        ctx.font = "11px sans-serif";
-        ctx.lineWidth = 1;
-        ctx.strokeStyle = "#d7e0e7";
-        ctx.fillStyle = "#60717c";
-        for (let tick = 0; tick <= 4; tick += 1) {
-          const value = maxValue * tick / 4;
-          const lineY = y(value);
-          ctx.beginPath();
-          ctx.moveTo(margin.left, lineY);
-          ctx.lineTo(width - margin.right, lineY);
-          ctx.stroke();
-          ctx.fillText(Math.round(value), 8, lineY + 4);
-        }
-        const drawSeries = (valuesToDraw, color, dash = []) => {
-          ctx.beginPath();
-          ctx.strokeStyle = color;
-          ctx.lineWidth = 2;
-          ctx.setLineDash(dash);
-          let started = false;
-          valuesToDraw.forEach((value, index) => {
-            if (value == null) { started = false; return; }
-            if (!started) { ctx.moveTo(x(index), y(value)); started = true; }
-            else ctx.lineTo(x(index), y(value));
-          });
-          ctx.stroke();
-          ctx.setLineDash([]);
-        };
-        drawSeries(prediction, "#1e6fa8");
-        drawSeries(observed, "#2f8f67");
-        if (revealedFinal != null) drawSeries(rows.map(() => revealedFinal), "#b34b4b", [6, 4]);
-        $("revealedLegend").classList.toggle("hidden", revealedFinal == null);
-        $("chartNote").textContent = revealedFinal == null
-          ? "蓝线是当时预测的最终数量，绿线是当时已经观察到的累计发推数。"
-          : `蓝线是预测最终数量，绿线是累计发推数，红色虚线是揭晓后的本地最终观测 ${revealedFinal}。`;
+        const series=[{key:"forecast",label:"模型预测最终数",color:"#1e6fa8"},{key:"observed",label:"当时累计数",color:"#2f8f67"}];
+        if(state.revealed)series.push({key:"actual",label:"本地最终观测",color:"#b34b4b",dash:[6,4]});
+        $("revealedLegend").classList.toggle("hidden",!state.revealed);
+        drawInteractiveChart("historyChart",rows.map(chartPoint),series,"chartNote");
       }
 
       function update() {
@@ -1486,9 +2565,9 @@
         if (!row) return;
         $("hourSlider").max = Math.max(0, rows.length - 1);
         $("hourSlider").value = state.index;
-        text("marketMeta", `${row.slug} · ${rows.length} 个小时`);
+        text("marketMeta", `${row.slug} · ${rows.length} 个 5 分钟检查点`);
         text("currentCount", row.current_count);
-        text("elapsedHours", fmt(row.elapsed_hours, 0));
+        text("elapsedHours", row.elapsed_hours == null ? "-" : `${fmt(number(row.elapsed_hours) * 60, 0)} 分钟`);
         const forecastNumber = number(row.model_forecast_final_count);
         text("forecastCount", forecastNumber == null ? "-" : `${fmt(forecastNumber, 2)}（约${Math.round(forecastNumber)}）`);
         text("forecastBin", row.forecast_bin);
@@ -1504,6 +2583,10 @@
         text("priceMass", mass == null ? "-" : `${fmt(mass, 3)} ${signal.valid ? "有效" : signal.hasMarketData ? "异常" : "未采集"}`);
         text("trainingWindows", row.training_windows);
         text("riskDecision", signal.decision);
+        text("backtestRecordStep", row.checkpoint_step_minutes == null ? "-" : `${fmt(row.checkpoint_step_minutes, 0)} 分钟`);
+        text("priceSnapshotAge", row.price_snapshot_age_minutes == null ? "-" : `${fmt(row.price_snapshot_age_minutes, 1)} 分钟`);
+        text("bookSnapshotAge", row.orderbook_snapshot_age_minutes == null ? "-" : `${fmt(row.orderbook_snapshot_age_minutes, 1)} 分钟`);
+        text("backtestDecision", `盘口候选：${row.decision_status || "-"}；实际纸面执行：${row.paper_execution_status || "-"}`);
         $("qualityBadge").className = `badge ${signal.valid ? "good" : "bad"}`;
         text("qualityBadge", signal.valid ? "盘口质量可用" : signal.hasMarketData ? "盘口质量异常" : "历史盘口未采集");
 
@@ -1512,13 +2595,18 @@
           : signal.direction === "偏低" ? "模型认为结算总数偏低" : "模型与盘口接近";
         text("guessMain", marketLabel);
         renderBinProbabilities(row);
+        renderHistoricalMarketRows(row);
+        renderPaper(currentRow());
+        if (state.backtest) renderBacktest(state.backtest);
+        text("checkpointDiagnostics", `检查点 ${row.checkpoint_utc}；模拟成交价 ${pct(row.paper_executable_price)}；手续费 ${pct(row.paper_fee_per_share)}；滑点 ${fmt(row.paper_slippage_bps)} bps；可填充比例 ${pct(row.estimated_fill_fraction)}；质量标记 ${qualityFlags(row.data_quality_flags)}；模型版本 ${state.backtest?.model_hash_sha256 || "CSV 未提供"}；本地速度 Brier / Log Loss ${state.revealed ? fmt(row.local_pace_brier_score, 4) + " / " + fmt(row.local_pace_log_loss, 4) : "揭晓后显示"}；市场 Brier / Log Loss ${state.revealed ? fmt(row.market_brier_score, 4) + " / " + fmt(row.market_log_loss, 4) : "揭晓后显示"}`);
         const binProbability = number(row.forecast_bin_probability);
         const probabilityText = binProbability == null ? "区间概率待模型提供" : `预测区间概率 ${pct(binProbability)}`;
-        const marketText = signal.hasMarketData ? `盘口隐含 ${fmt(row.market_expected_count)}` : "历史盘口未采集";
+        const marketText = signal.hasMarketData ? `盘口隐含 ${fmt(row.market_expected_count)}` : "该 5 分钟区间未采集盘口";
         text("guessDetail", `模型 ${fmt(row.model_forecast_final_count)} · ${marketText} · 当前累计 ${row.current_count || 0} · ${probabilityText}`);
         drawHistoryChart(rows);
         drawResidualChart(rows);
 
+        if (!state.revealed) drawGlobalResidualChart();
         const canShow = state.revealed;
         $("answerLock").classList.toggle("hidden", canShow);
         $("answerContent").classList.toggle("hidden", !canShow);
@@ -1529,12 +2617,19 @@
           text("resolvedBin", row.resolved_bin);
           text("absoluteError", row.absolute_error_to_observed_count);
           const hit = bool(row.forecast_in_resolved_bin);
-          text("binHit", row.forecast_in_resolved_bin === "" ? "-" : (hit ? "命中" : "未命中"));
+          text("binHit", row.forecast_in_resolved_bin == null || row.forecast_in_resolved_bin === "" ? "-" : (hit ? "命中" : "未命中"));
+          text("checkpointBrier", row.brier_score);
+          text("checkpointLogLoss", row.log_loss);
           updateReview();
+        } else {
+          text("checkpointBrier", null);
+          text("checkpointLogLoss", null);
         }
-        $("revealButton").disabled = state.privateRows.length === 0;
+        $("revealButton").disabled = !rows.length;
         $("revealButton").textContent = state.revealed ? "隐藏结算" : "揭晓结算";
-        $("modeNote").textContent = state.revealed ? "复盘数据已揭晓" : "实际结算值已锁定";
+        $("modeNote").textContent = state.revealed
+          ? "统一历史回测与复盘：已显示本地结算答案与评分。"
+          : "统一历史回测与复盘：当前 5 分钟历史价格、订单簿和成本后 edge 可见，结算答案与评分仍锁定。";
       }
 
       function updateReview() {
@@ -1582,113 +2677,52 @@
       }
 
       function drawGlobalResidualChart() {
-        const canvas = $("globalResidualChart");
-        if (!canvas) return;
-        const grouped = new Map();
-        state.privateRows.forEach((row) => {
-          if (!row.slug || !String(row.resolved_bin || "").trim()) return;
-          if (!grouped.has(row.slug)) grouped.set(row.slug, []);
-          grouped.get(row.slug).push(row);
+        const grouped=new Map();
+        if(state.revealed)state.privateRows.forEach(row=>{
+          const previous=grouped.get(row.slug);
+          if(!previous||rowTime(row)>rowTime(previous))grouped.set(row.slug,row);
         });
-        const markets = [...grouped.entries()].map(([slug, marketRows]) => {
-          const ordered = marketRows.slice().sort((left, right) => rowTime(left) - rowTime(right));
-          const finalRow = ordered.slice().reverse().find((row) =>
-            number(row.model_forecast_final_count) != null && number(row.observed_local_final_count) != null
-          );
-          if (!finalRow) return null;
-          const forecast = number(finalRow.model_forecast_final_count);
-          const actual = number(finalRow.observed_local_final_count);
-          const midpoint = officialMidpoint(finalRow);
-          return {
-            slug,
-            checkpoint: finalRow.checkpoint_utc || "",
-            actualResidual: forecast - actual,
-            midpointResidual: midpoint == null ? null : forecast - midpoint
-          };
-        }).filter(Boolean).sort((left, right) => Date.parse(left.checkpoint) - Date.parse(right.checkpoint));
-
-        if (!markets.length) {
-          canvas.width = 760;
-          canvas.height = 280;
-          $("globalResidualNote").textContent = "没有同时具备官方结算区间、最终预测和本地最终观测的已结算市场。";
-          return;
-        }
-        const actualResiduals = markets.map((item) => item.actualResidual);
-        const midpointResiduals = markets.map((item) => item.midpointResidual);
-        const usable = [...actualResiduals, ...midpointResiduals].filter((value) => value != null);
-        const width = Math.max(320, canvas.clientWidth || 760);
-        const height = 280;
-        const ratio = window.devicePixelRatio || 1;
-        canvas.width = width * ratio;
-        canvas.height = height * ratio;
-        const ctx = canvas.getContext("2d");
-        ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-        ctx.clearRect(0, 0, width, height);
-        const margin = { left: 54, right: 18, top: 18, bottom: 36 };
-        const plotWidth = width - margin.left - margin.right;
-        const plotHeight = height - margin.top - margin.bottom;
-        const maxAbsolute = Math.max(1, ...usable.map((value) => Math.abs(value))) * 1.12;
-        const x = (index) => margin.left + (markets.length <= 1 ? 0 : index / (markets.length - 1)) * plotWidth;
-        const y = (value) => margin.top + plotHeight / 2 - (value / maxAbsolute) * (plotHeight / 2);
-        ctx.font = "11px sans-serif";
-        ctx.lineWidth = 1;
-        ctx.strokeStyle = "#d7e0e7";
-        ctx.fillStyle = "#60717c";
-        for (let tick = -2; tick <= 2; tick += 1) {
-          const value = maxAbsolute * tick / 2;
-          const lineY = y(value);
-          ctx.beginPath();
-          ctx.moveTo(margin.left, lineY);
-          ctx.lineTo(width - margin.right, lineY);
-          ctx.stroke();
-          ctx.fillText(`${value > 0 ? "+" : ""}${Math.round(value)}`, 8, lineY + 4);
-        }
-        ctx.beginPath();
-        ctx.strokeStyle = "#60717c";
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([5, 4]);
-        ctx.moveTo(margin.left, y(0));
-        ctx.lineTo(width - margin.right, y(0));
-        ctx.stroke();
-        ctx.setLineDash([]);
-
-        const drawSeries = (values, color, dash = []) => {
-          ctx.beginPath();
-          ctx.strokeStyle = color;
-          ctx.lineWidth = 2;
-          ctx.setLineDash(dash);
-          let started = false;
-          values.forEach((value, index) => {
-            if (value == null) { started = false; return; }
-            if (!started) { ctx.moveTo(x(index), y(value)); started = true; }
-            else ctx.lineTo(x(index), y(value));
-          });
-          ctx.stroke();
-          ctx.setLineDash([]);
-        };
-        drawSeries(actualResiduals, "#b33a3a");
-        drawSeries(midpointResiduals, "#9a6500", [6, 4]);
-        actualResiduals.forEach((value, index) => {
-          ctx.beginPath();
-          ctx.fillStyle = value > 0 ? "#b33a3a" : value < 0 ? "#1769aa" : "#2f8f67";
-          ctx.arc(x(index), y(value), 3, 0, Math.PI * 2);
-          ctx.fill();
-        });
-        ctx.fillStyle = "#60717c";
-        const firstLabel = markets[0].checkpoint.slice(0, 10) || "起点";
-        const lastLabel = markets[markets.length - 1].checkpoint.slice(0, 10) || "终点";
-        ctx.fillText(firstLabel, margin.left, height - 10);
-        ctx.fillText(lastLabel, Math.max(margin.left, width - margin.right - ctx.measureText(lastLabel).width), height - 10);
-        const midpointCount = midpointResiduals.filter((value) => value != null).length;
-        $("globalResidualNote").textContent = `按结算时间排序，共 ${markets.length} 个已结算市场；实线使用本地最终观测，共 ${markets.length} 点，虚线使用官方区间中点代理，共 ${midpointCount} 点。正值表示最终预测高估，负值表示低估。`;
+        const points=[...grouped.values()].sort((a,b)=>rowTime(a)-rowTime(b)).map(chartPoint);
+        drawInteractiveChart("globalResidualChart",points,residualSeries,"globalResidualNote");
       }
 
+      window.addEventListener("resize",()=>{if(currentRow())update();});
       $("loadFixedPublicButton").addEventListener("click", loadFixedPublicReport);
       $("loadFixedPrivateButton").addEventListener("click", loadFixedPrivateReports);
+      $("clearBrowserCacheButton").addEventListener("click", clearBrowserCache);
+      $("scanDataFilesButton").addEventListener("click", () => organizeDataFiles("scan"));
+      $("consolidateDataFilesButton").addEventListener("click", () => {
+        if (window.confirm("将扫描 data/ 并在 data/consolidated/ 写入去重合并副本。不会删除或覆盖任何源文件、SQLite、CSV、JSONL、订单簿、原始帖子、模型或备份。继续？")) organizeDataFiles("consolidate");
+      });
+      $("deleteDuplicateDataFilesButton").addEventListener("click", () => organizeDataFiles("delete"));
       $("startLiveButton").addEventListener("click", startLive);
+      $("researchCaptureNowButton").addEventListener("click", researchCaptureNow);
       $("refreshNowButton").addEventListener("click", refreshNow);
       $("startHistorySyncButton").addEventListener("click", startHistorySync);
       $("newsSyncButton").addEventListener("click", startNewsSync);
+      $("refreshTimeDecayButton").addEventListener("click", loadHistoryReview);
+      $("loadBacktestButton").addEventListener("click", loadBacktest);
+      $("fullMarketRangeButton").addEventListener("click", () => {
+        $("backtestStart").value = "";
+        $("backtestEnd").value = "";
+        loadUnifiedHistory($("marketSelect").value);
+      });
+      for (const name of ["prediction", "paper", "diagnostic"]) {
+        $(name + "Tab").addEventListener("click", () => {
+          for (const other of ["prediction", "paper", "diagnostic"]) {
+            $(other + "Pane").classList.toggle("hidden", other !== name);
+            $(other + "Tab").setAttribute("aria-selected", String(other === name));
+          }
+          update();
+        });
+      }
+      for (const id of ["backtestStart", "backtestEnd"]) {
+        $(id).addEventListener("change", () => {
+          cancelHistoryLoad();
+          ++state.historyRequest;
+          clearHistory("日期范围已变更，请读取数据");
+        });
+      }
       $("stopLiveButton").addEventListener("click", stopLive);
       $("aiSaveButton").addEventListener("click", saveAIConfig);
       $("aiClearButton").addEventListener("click", clearAIConfig);
@@ -1701,33 +2735,65 @@
       $("marketSelect").addEventListener("change", (event) => {
         state.market = event.target.value;
         state.index = 0;
-        update();
+        state.revealed = false;
+        if (state.source === "csv") update();
+        else {
+          $("backtestStart").value = "";
+          $("backtestEnd").value = "";
+          loadUnifiedHistory(state.market);
+        }
       });
       $("hourSlider").addEventListener("input", (event) => {
         state.index = Number(event.target.value);
         update();
       });
-      $("guessMode").addEventListener("click", () => {
-        state.mode = "guess";
-        $("guessMode").classList.add("active");
-        $("reviewMode").classList.remove("active");
-        state.revealed = false;
-        update();
+      $("paperUseCurrent").addEventListener("click",()=>{
+        const row=currentRows()[state.index];
+        if(row){
+          const market=state.backtest?.markets?.find(m=>m.slug===row.slug);
+          const minutes=market?.window_start_utc ? Math.round((Date.parse(row.checkpoint_utc)-Date.parse(market.window_start_utc))/60000) : Math.round(Number(row.elapsed_hours||0)*60);
+          $("paperEntryTime").value=Math.floor(minutes/60); $("paperEntryMinutes").value=minutes%60;
+        }
       });
-      $("reviewMode").addEventListener("click", () => {
-        state.mode = "review";
-        $("reviewMode").classList.add("active");
-        $("guessMode").classList.remove("active");
-        update();
+      $("paperRerun").addEventListener("click",()=>loadUnifiedHistory($("marketSelect").value));
+      $("paperAllRun").addEventListener("click", async()=>{
+        let request=state.historyRequest;
+        try {
+          const endpoint=historyEndpoint("/api/backtest-review");
+          applyPaperSettings(endpoint);
+          if(endpoint.searchParams.get("paper_mode")!=="mandatory_entry" || endpoint.searchParams.get("paper_exit_policy")!=="hold_to_settlement") throw new Error("全历史统计需要指定节点强制建仓并持有至结算");
+          cancelHistoryLoad();
+          request=++state.historyRequest;
+          historyController=new AbortController();
+          endpoint.searchParams.set("async","1");endpoint.searchParams.set("client_id",historyClientId);
+          endpoint.searchParams.set("generation",String(request));
+          endpoint.searchParams.set("step_minutes","5");endpoint.searchParams.set("min_elapsed_minutes","5");
+          await runAllHolding(endpoint,request,historyController.signal);
+        } catch(error) {
+          if(request===state.historyRequest && error.name!=="AbortError") text("paperAllStatus","全历史统计中断："+error.message);
+        }
       });
+      $("paperGridRun").addEventListener("click", runPaperGridResearch);
+      for (const [id,direction] of [["paperFirstFill",0],["paperPreviousFill",-1],["paperNextFill",1]]) {
+        $(id).addEventListener("click",()=>{
+          const indices=currentRows().map((r,i)=>(r.position_actions||[]).some(a=>a.quantity_delta)?i:-1).filter(i=>i>=0);
+          const next=direction===0?indices[0]:direction<0?indices.filter(i=>i<state.index).at(-1):indices.find(i=>i>state.index);
+          if(next!=null){state.index=next;update();}
+        });
+      }
       $("revealButton").addEventListener("click", () => {
         state.revealed = !state.revealed;
+        renderAllHolding();
         update();
+        if (state.backtest) renderBacktest(state.backtest);
       });
-      $("historyEndDate").value = new Date().toISOString().slice(0, 10);
+      const localDate = new Date();
+      localDate.setMinutes(localDate.getMinutes() - localDate.getTimezoneOffset());
+      $("historyEndDate").value = localDate.toISOString().slice(0, 10);
       pollHistorySync();
       pollNewsSync();
-      autoLoadFixedPublicReport();
+
+      loadBacktestMarkets();
       loadAIStatus();
     })();
   </script>

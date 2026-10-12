@@ -5,7 +5,8 @@ param(
     [string]$Proxy = "http://127.0.0.1:7897",
     [string[]]$ExtraSlug = @(),
     [int]$Port = 8765,
-    [int]$RefreshSeconds = 30,
+    [int]$RefreshSeconds = 300,
+    [int]$ResearchRefreshSeconds = 30,
     [int]$Timeout = 20
 )
 
@@ -14,27 +15,19 @@ $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
+$dynamicDiscovery = [string]::IsNullOrWhiteSpace($Slug)
 
 function Get-ActiveMarketSlugs {
-    $timezone = [System.TimeZoneInfo]::FindSystemTimeZoneById("Eastern Standard Time")
-    $now = [System.TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow, $timezone)
-    $marketStarts = @()
-    for ($offset = 0; $offset -lt 8; $offset += 1) {
-        $candidate = $now.Date.AddDays(-$offset)
-        $isStartDay = $candidate.DayOfWeek -in @([DayOfWeek]::Tuesday, [DayOfWeek]::Friday)
-        $hasOpened = $candidate -lt $now.Date -or $now.TimeOfDay -ge [TimeSpan]::FromHours(12)
-        if ($isStartDay -and $hasOpened) {
-            $marketStarts += $candidate
-        }
+    $json = & python .\polymarket_pipeline.py discover-live --timezone "America/New_York" --proxy $Proxy --timeout $Timeout
+    if ($LASTEXITCODE -ne 0 -or -not $json) {
+        throw "Gamma market discovery failed; live service was not started."
     }
-    if ($marketStarts.Count -lt 2) {
-        throw "Could not determine the two active Tuesday/Friday market windows."
+    $result = $json | ConvertFrom-Json
+    $slugs = @($result.slugs | Where-Object { $_ })
+    if ($slugs.Count -eq 0) {
+        throw "Gamma found no active Elon Musk count market; live service was not started."
     }
-    $culture = [System.Globalization.CultureInfo]::InvariantCulture
-    return @($marketStarts | Sort-Object -Descending | Select-Object -First 2 | ForEach-Object {
-        $end = $_.AddDays(7)
-        "elon-musk-of-tweets-$($_.ToString('MMMM', $culture).ToLowerInvariant())-$($_.Day)-$($end.ToString('MMMM', $culture).ToLowerInvariant())-$($end.Day)"
-    })
+    return $slugs
 }
 
 if (-not $Slug) {
@@ -49,6 +42,12 @@ if (-not (Test-Path -LiteralPath $Db)) {
 
 if (-not (Test-Path -LiteralPath $Model)) {
     throw "Model file not found: $Model"
+}
+
+$portOwner = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+if ($portOwner) {
+    $owners = @($portOwner | Select-Object -ExpandProperty OwningProcess -Unique)
+    throw "Port $Port is already listening (PID: $($owners -join ', ')); a second live service was not started."
 }
 
 Write-Host "Starting live dashboard on http://127.0.0.1:$Port/" -ForegroundColor Cyan
@@ -67,8 +66,12 @@ $arguments = @(
     "--proxy", $Proxy,
     "--port", $Port,
     "--refresh-seconds", $RefreshSeconds,
+    "--research-refresh-seconds", $ResearchRefreshSeconds,
     "--timeout", $Timeout
 )
+if ($dynamicDiscovery) {
+    $arguments += "--dynamic-discovery"
+}
 foreach ($extra in $ExtraSlug) {
     $arguments += @("--extra-slug", $extra)
 }
